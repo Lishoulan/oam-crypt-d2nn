@@ -167,7 +167,8 @@ def main():
     batch_imgs = next(iter(test_loader)).to(device)
     U_cipher = encrypt_batch(
         batch_imgs, CONFIG["l_auth"], rpp_system,
-        CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device
+        CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
+        z_list=CONFIG["z_list"]
     )  # (1, 128, 128) complex64
 
     print("=" * 65)

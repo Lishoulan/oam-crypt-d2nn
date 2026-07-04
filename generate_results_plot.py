@@ -37,7 +37,7 @@ def main():
         size=CONFIG["size"], num_layers=CONFIG["num_layers"],
         wavelength=CONFIG["wavelength"], pixel_size=CONFIG["pixel_size"],
         z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_system,
-        oam_keys=CONFIG["l_auth"]
+        oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"]
     ).to(device)
     model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
@@ -48,7 +48,7 @@ def main():
     U_cipher = encrypt_batch(
         batch_imgs, CONFIG["l_auth"], rpp_system,
         CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-        size=CONFIG["size"]
+        size=CONFIG["size"], z_list=CONFIG["z_list"]
     )
 
     with torch.no_grad():
@@ -60,7 +60,7 @@ def main():
     cipher_wrong = encrypt_batch(
         batch_imgs, CONFIG["l_auth"], rpp_wrong,
         CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-        size=CONFIG["size"]
+        size=CONFIG["size"], z_list=CONFIG["z_list"]
     )
     with torch.no_grad():
         pred_wrong = model(cipher_wrong)

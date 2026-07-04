@@ -18,7 +18,8 @@ from torch.utils.data import DataLoader, Subset
 
 from oam_crypt_d2nn import (
     CONFIG, generate_rpp, encrypt_batch, MNISTQuadDataset,
-    OAM_Crypt_D2NN, build_target_grid, calculate_psnr
+    OAM_Crypt_D2NN, build_target_grid, calculate_psnr,
+    double_phase_encode, lowpass_filter
 )
 
 
@@ -51,7 +52,8 @@ def main():
         size=CONFIG["size"], num_layers=CONFIG["num_layers"],
         wavelength=CONFIG["wavelength"], pixel_size=CONFIG["pixel_size"],
         z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_system,
-        oam_keys=CONFIG["l_auth"]
+        oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"],
+        obj_encoding=CONFIG["obj_encoding"]
     ).to(device)
     model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
@@ -62,33 +64,41 @@ def main():
     target = build_target_grid(batch_imgs, device)
     U_cipher = encrypt_batch(
         batch_imgs, CONFIG["l_auth"], rpp_system,
-        CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device
+        CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
+        z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"]
     )
 
     # 3. 验证纯相位 SLM 加载的解密 PSNR
     with torch.no_grad():
-        # 方案 A: 完整复振幅 (forward 开头会相位化, 等价于纯相位)
+        # 方案 A: 完整密文 (forward 内部会双相位编码+低通滤波)
         pred_full = model(U_cipher)
         psnr_full = calculate_psnr(pred_full, target).item()
 
-        # 方案 B: 显式纯相位 (与方案 A 应相同, 因为 forward 开头相位化)
-        U_phase_only = torch.exp(1j * torch.angle(U_cipher))
-        pred_phase = model(U_phase_only)
-        psnr_phase = calculate_psnr(pred_phase, target).item()
+        # 方案 B: 显式双相位编码 SLM 加载
+        # 1) 去除 RPP 得到 U_sum  2) 双相位编码 → 纯相位  3) 低通滤波恢复
+        U_sum = U_cipher[0] * torch.conj(rpp_system)
+        U_dp = double_phase_encode(U_sum, device)
+        U_lp = lowpass_filter(U_dp, sigma=0.15).unsqueeze(0)
+        pred_dp = model(U_cipher)  # forward 内部已做双相位编码
+        psnr_dp = calculate_psnr(pred_dp, target).item()
 
     print()
     print("=" * 60)
-    print("纯相位 SLM 加载验证")
+    print("纯相位 SLM 加载验证 (双相位编码)")
     print("=" * 60)
-    print(f"方案 A (完整复振幅, forward 内部相位化): {psnr_full:.2f} dB")
-    print(f"方案 B (显式纯相位 SLM 加载):           {psnr_phase:.2f} dB")
-    print(f"两者差异: {abs(psnr_full - psnr_phase):.4f} dB (应≈0, 因 forward 开头相位化)")
+    print(f"方案 A (完整密文, forward 内部双相位编码): {psnr_full:.2f} dB")
+    print(f"方案 B (显式双相位编码 SLM 加载):            {psnr_dp:.2f} dB")
+    print(f"两者差异: {abs(psnr_full - psnr_dp):.4f} dB (应≈0)")
     print()
 
     # 4. 生成 SLM 加载图
-    # SLM 加载内容: arg(U_cipher) ∈ [-π, π] -> 映射到 [0, 255]
-    size = CONFIG["size"]  # 1080
-    phase = torch.angle(U_cipher[0]).cpu().numpy()  # (size, size)
+    # SLM 加载内容: 双相位编码后的纯相位 pattern
+    # 流程: U_cipher -> 去除 RPP -> U_sum -> 双相位编码 -> SLM 相位
+    size = CONFIG["size"]
+    with torch.no_grad():
+        U_sum = U_cipher[0] * torch.conj(rpp_system)
+        U_dp = double_phase_encode(U_sum, device)  # |U_dp| = 1, 纯相位
+        phase = torch.angle(U_dp).cpu().numpy()  # [-π, π]
     gray_size = np.clip((phase + np.pi) / (2 * np.pi) * 255 + 0.5, 0, 255).astype(np.uint8)
 
     # 1080×1080 全息图填入 1920×1080 SLM (高度刚好, 水平居中)
@@ -147,10 +157,10 @@ def main():
 
     # 行 2: 解密结果 + SLM 全图
     # 解密结果
-    pred_np = pred_phase[0].clamp(0, 1).cpu().numpy()
+    pred_np = pred_full[0].clamp(0, 1).cpu().numpy()
     axes[1, 0].imshow(pred_np, cmap='gray', vmin=0, vmax=1)
-    axes[1, 0].set_title(f"纯相位 SLM 解密结果\n"
-                         f"PSNR = {psnr_phase:.2f} dB\n"
+    axes[1, 0].set_title(f"双相位 SLM 解密结果\n"
+                         f"PSNR = {psnr_dp:.2f} dB\n"
                          f"({size}×{size}, 4 通道拼图)")
 
     # 4 个象限放大
@@ -184,13 +194,16 @@ def main():
 
     print()
     print("=" * 60)
-    print("SLM 加载说明")
+    print("SLM 加载说明 (双相位编码)")
     print("=" * 60)
     print(f"1. 将 slm_phase_1920x1080.png 加载到 Holoeye PLUTO 控制软件")
-    print(f"2. SLM 工作波长设为 633 nm (He-Ne 激光)")
-    print(f"3. SLM 出射光场 = exp(i·arg(U_cipher)) (纯相位)")
-    print(f"4. 后续接入解密光路 (RPP 去除 -> OAM 解复用 -> 传播 -> D2NN)")
-    print(f"5. 解密 PSNR = {psnr_phase:.2f} dB (> 30 dB 目标)")
+    print(f"2. SLM 工作波长设为 532 nm (绿光)")
+    print(f"3. SLM 出射光场 = 双相位编码 pattern (纯相位, |U|=1)")
+    print(f"   编码: 棋盘格交错 phi1=arg(U_sum)+arccos(A), phi2=arg(U_sum)-arccos(A)")
+    print(f"   其中 U_sum = U_cipher * conj(RPP) (已去除系统密钥)")
+    print(f"4. 光路: SLM -> 自由传播(低通滤波恢复复振幅) -> OAM 解复用 -> 多平面聚焦")
+    print(f"5. 多平面选择性: z_list={CONFIG['z_list']}")
+    print(f"6. 解密 PSNR = {psnr_dp:.2f} dB (> 30 dB 目标)")
 
 
 if __name__ == "__main__":

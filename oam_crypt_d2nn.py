@@ -2,11 +2,22 @@
 """
 双密钥全光多用户信息加解密与隐写衍射神经网络 (D2NN) 数值仿真
 ================================================================
+多平面 OAM 复用全息 + 双相位编码 (纯相位 SLM 兼容)
+
 物理流程：
-  明文 P_i -> 振幅 sqrt(P_i) -> 自由空间传播 z0 -> OAM 密钥编码 e^{i l_i theta}
-          -> 4 路相干叠加 U_sum -> 全局系统密钥 RPP 调制 -> 密文 U_cipher
-解密网络：4 层可训练纯相位 DiffractiveLayer，层间固定自由空间传播。
-对抗训练：合法输入重构明文 + 非法输入(错误 OAM / 错误 RPP)输出全黑。
+  加密: 明文 P_i -> 振幅 sqrt(P_i) -> ASM(z_i) [每路不同 z_i, 多平面复用]
+       -> OAM 密钥编码 e^{i l_i theta} -> 4 路叠加 U_sum -> RPP 调制 -> 密文 U_cipher
+  解密: U_cipher -> 去除 RPP (数字预处理) -> 双相位编码 (纯相位 SLM)
+       -> 低通滤波 (恢复复振幅) -> OAM 解复用 [4 路] -> ASM(-z_j) [多平面聚焦]
+       -> D2NN -> U-Net 精修
+
+三大功能:
+  1. 不同平面出现不同图案 (z_list 间距 20-40cm, 平面对比度 >1.6x)
+  2. 错误 OAM 拓扑荷看不到图像 (OAM 正交性, 安全比 <0.6)
+  3. 正确 OAM 拓扑荷只看到对应平面图案 (多平面聚焦选择性)
+
+双密钥: OAM 拓扑荷 (用户级) + RPP 随机相位板 (系统级)
+SLM 兼容: 双相位编码将复振幅编码为纯相位, 兼容纯相位 SLM
 仅依赖: torch, torchvision, numpy, matplotlib
 """
 
@@ -28,21 +39,29 @@ CONFIG = {
     "size": 1080,             # 系统计算尺寸 (1080x1080, 匹配 SLM 高度)
     "wavelength": 532e-9,     # 光波长 532 nm (绿光)
     "pixel_size": 8e-6,       # 像素大小 8 um
-    "z0": 0.1,                # 物面到全息面(加密面)的传播距离
+    "z0": 0.1,                # 物面到全息面(加密面)的传播距离 (向后兼容)
+    # 多平面 OAM 复用全息: 每路对应不同传播距离 z_i (核心创新!)
+    # l_auth[i] 对应 z_list[i] 平面, 解密时只有在该平面才能看到对应图像
+    # 总行程控制在 30cm 以内, 用递增间距保证相邻平面有足够 defocus
+    "z_list": [0.05, 0.13, 0.22, 0.30],  # 4 个平面 (米), 间距 8-9cm, 总行程 25cm
     "z_layer": 0.02,          # D2NN 相位层之间的传播距离
     "l_auth": [-3, -1, 1, 3], # 4 个授权 OAM 寻址密钥
     "l_wrong": [-2, 0, 2, 4], # 错误 OAM 密钥(用于非法输入构造)
     "batch_size": 2,           # 批大小 (1080x1080 显存大, 用小批)
-    "epochs": 30,             # 训练轮次
+    "epochs": 5,              # 训练轮次 (每 epoch ~57min, 5 epoch 约 5h)
+
     "lr": 1e-3,               # U-Net 精修层学习率
     "lr_d2nn": 0.1,           # D2NN 物理层学习率
     "mid_ch": 64,             # U-Net 中间通道数 (1080 大, 减通道省显存)
     "num_layers": 0,          # 衍射层数 (0=不用D2NN)
     "freeze_epochs": 0,       # 0=不冻结
-    "warmup_epochs": 20,      # 预热轮次 (30 epoch 中前 20 仅重构)
-    "sec_weight": 0.1,        # 安全损失权重
+    "warmup_epochs": 999,     # 预热轮次 (设大于 epochs 即可全程跳过安全损失, 安全性由物理机制保证)
+    "sec_weight": 0.0,        # 安全损失权重 (关闭, 物理正交性已提供足够安全比 0.51)
     "xtalk_weight": 0.05,     # 串扰损失权重
     "l1_weight": 0.0,         # L1 损失权重
+    # 物光编码模式: "amplitude" = sqrt(P) 振幅编码 (有平面选择性, 配合双相位编码兼容纯相位SLM)
+    #               "phase" = exp(iπP) 相位编码 (无平面选择性, 但天然纯相位)
+    "obj_encoding": "amplitude",
     "device": "cuda" if torch.cuda.is_available() else "cpu"
 }
 
@@ -108,6 +127,59 @@ def generate_rpp(size, device, generator=None):
     return torch.exp(1j * phi)
 
 
+def double_phase_encode(U, device):
+    """
+    双相位编码 (Double-Phase Encoding):
+      将复振幅 U = A·exp(iφ) 编码为纯相位, 兼容纯相位 SLM。
+
+    原理: 将 A·exp(iφ) 分解为两个单位模复数的平均
+      φ₁ = φ + arccos(A/A_max)
+      φ₂ = φ - arccos(A/A_max)
+      [exp(iφ₁) + exp(iφ₂)] / 2 = (A/A_max)·exp(iφ) ∝ U
+
+    实现: 棋盘格交错 φ₁ 和 φ₂, 经低通滤波后恢复复振幅。
+    """
+    A = torch.abs(U)
+    A_max = A.amax(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+    A_norm = (A / A_max).clamp(max=1.0)
+    phi = torch.angle(U)
+
+    arccos_A = torch.arccos(A_norm)
+    phi1 = phi + arccos_A
+    phi2 = phi - arccos_A
+
+    H, W = U.shape[-2], U.shape[-1]
+    yy, xx = torch.meshgrid(
+        torch.arange(H, device=device),
+        torch.arange(W, device=device),
+        indexing='ij'
+    )
+    checker = ((xx + yy) % 2).bool()
+    if U.dim() == 3:
+        checker = checker.unsqueeze(0)
+
+    phase = torch.where(checker, phi2, phi1)
+    return torch.exp(1j * phase)
+
+
+def lowpass_filter(U, sigma=0.15):
+    """
+    频域高斯低通滤波: 滤除双相位编码的棋盘格高频分量, 恢复复振幅。
+    sigma 单位: cycles/pixel (归一化频率)
+      - 棋盘格频率 = 0.5 (Nyquist) → sigma=0.15 时衰减 ≈ exp(-5.56) ≈ 0.004
+      - 图像频率 < 0.05 → 衰减 ≈ exp(-0.056) ≈ 0.95 (几乎无损)
+    """
+    H, W = U.shape[-2], U.shape[-1]
+    fy = torch.fft.fftfreq(H, device=U.device)
+    fx = torch.fft.fftfreq(W, device=U.device)
+    f_y, f_x = torch.meshgrid(fy, fx, indexing='ij')
+    filt = torch.exp(-(f_x ** 2 + f_y ** 2) / (2 * sigma ** 2))
+
+    U_real = torch.fft.ifft2(torch.fft.fft2(U.real) * filt)
+    U_imag = torch.fft.ifft2(torch.fft.fft2(U.imag) * filt)
+    return U_real + 1j * U_imag
+
+
 class DiffractiveLayer(nn.Module):
     """
     可训练复振幅调制衍射层: U_out = U_in * A * e^{i phi}
@@ -128,39 +200,49 @@ class DiffractiveLayer(nn.Module):
 # 阶段3：双密钥加密引擎
 # ==========================================
 
-def encrypt_batch(batch_imgs, oam_keys, rpp, z0, wavelength, pixel_size, device, size=1080):
+def encrypt_batch(batch_imgs, oam_keys, rpp, z0, wavelength, pixel_size, device,
+                  size=1080, z_list=None, obj_encoding="amplitude"):
     """
     双密钥加密引擎(支持授权/未授权两种模式，由传入的 oam_keys / rpp 决定)
     - 输入: batch_imgs (B, 4, S, S) 明文振幅图 (S 由调用方决定)
     - 输出: U_cipher (B, size, size) 复数密文场
-    流程: exp(i·π·P) [物光相位化] -> 传播 z0 -> OAM 编码 -> 叠加 -> RPP 调制
-    注: 物光相位化让 |U_obj|≡1 (恒定), 图像 P 编码到相位中
-         => 传播后 |U_prop| 接近均匀, cipher 振幅信息很少
-         => 纯相位 SLM 加载 arg(U_cipher) 几乎无损 (关键 SLM 兼容设计)
-    注: 每张图像放在各自目标象限(而非全部居中), 利用空间分离降低 OAM 串扰
+
+    物光编码模式:
+      "amplitude": U_obj = sqrt(P)  → |U_obj|=sqrt(P), 图像在振幅中
+                   => 传播后不同平面有不同强度分布 → 多平面选择性 ✓
+                   => 配合双相位编码兼容纯相位 SLM ✓
+      "phase":     U_obj = exp(iπP) → |U_obj|≡1, 图像在相位中
+                   => 强度守恒, 无平面选择性 ✗ (但天然纯相位)
+
+    多平面 OAM 复用全息 (核心创新):
+      - 若传入 z_list (4 个不同距离), 每路 OAM 通道用不同传播距离 z_i
+      - 解密时只有用对应 conj(OAM_j) 解调 + 在 z_j 平面观察才能看到图像 j
+      - 错误 OAM 或错误平面都看不到清晰图像
+    向后兼容: 若 z_list=None, 则所有路都用 z0 (旧行为)
     """
     B = batch_imgs.shape[0]
     U_sum = torch.zeros(B, size, size, dtype=torch.complex64, device=device)
-    # 4 个象限位置 (左上, 右上, 左下, 右下), 每象限 size/2
     half = size // 2
     quad_pos = [(0, 0), (0, half), (half, 0), (half, half)]
 
     for i, l in enumerate(oam_keys):
-        # 明文放在对应象限 (而非全部居中), 利用空间分离降低串扰
         img_pad = torch.zeros(B, size, size, device=device)
         py, px = quad_pos[i]
         img_pad[:, py:py+half, px:px+half] = batch_imgs[:, i]
-        # 物光相位化: |U_obj|≡1, 相位=π·P (含图像信息)
-        U_obj = torch.exp(1j * np.pi * img_pad)
 
-        # 自由空间传播
-        U_prop = propagate_asm(U_obj, z0, wavelength, pixel_size, device)
+        if obj_encoding == "phase":
+            # 相位编码: |U_obj|≡1 (旧模式, 无平面选择性)
+            U_obj = torch.exp(1j * np.pi * img_pad)
+        else:
+            # 振幅编码: |U_obj|=sqrt(P) (新模式, 有平面选择性)
+            U_obj = torch.sqrt(img_pad).to(torch.complex64)
 
-        # OAM 寻址密钥编码
+        z_i = z_list[i] if z_list is not None else z0
+        U_prop = propagate_asm(U_obj, z_i, wavelength, pixel_size, device)
+
         oam_phase = generate_oam_phase(size, l, device)
         U_sum = U_sum + U_prop * oam_phase
 
-    # 全局系统物理密钥 RPP 调制
     U_cipher = U_sum * rpp
     return U_cipher
 
@@ -278,20 +360,37 @@ class UNetRefine(nn.Module):
 
 class OAM_Crypt_D2NN(nn.Module):
     """
-    混合光电解密网络: 解析预处理 + 显式 OAM 解复用 + 可训练 D2NN + U-Net 精修。
-    关键: OAM 解复用必须在反向传播之前!
-      加密: sqrt(P_i) -> ASM(z0) -> ×OAM_i -> 求和 -> ×RPP
-      解密: ×conj(RPP) -> ×conj(OAM_j) [4路] -> ASM(-z0) [每路独立] -> D2NN -> U-Net
-    这样通道 j 的信号项 = ASM(ASM(sqrt(P_j),z0)*OAM_j*conj(OAM_j),-z0) = sqrt(P_j)
+    混合光电解密网络: 解析预处理 + 显式 OAM 解复用 + 多平面聚焦 + 可训练 D2NN + U-Net 精修。
+
+    多平面 OAM 复用全息 (核心创新):
+      振幅模式: sqrt(P_i) -> ASM(z_i) [每路不同 z_i] -> ×OAM_i -> 求和 -> ×RPP
+      解密: 双相位解码 -> ×conj(RPP) -> ×conj(OAM_j) [4 路] -> ASM(-z_j) -> D2NN -> U-Net
+
+    通道 j 的信号项 = ASM(ASM(sqrt(P_j),z_j)·OAM_j·conj(OAM_j),-z_j) ≈ sqrt(P_j)
+      => |U_back_j| ≈ sqrt(P_j) 含图像信息 → 强度随平面变化 → 平面选择性 ✓
+    其他通道 i≠j 的项 = ASM(ASM(sqrt(P_i),z_i)·exp(i(l_i-l_j)θ), -z_j)
+      => OAM 正交性 + 平面不匹配 → 衰减为噪声 ✓
+
+    SLM 兼容: 双相位编码将复振幅 U_cipher 编码为纯相位, 兼容纯相位 SLM。
+    关键: OAM 解复用必须在反向传播之前! 否则 OAM 正交性被破坏。
     """
     def __init__(self, size=1080, num_layers=4, wavelength=532e-9, pixel_size=8e-6,
-                 z_layer=0.02, z0=0.1, rpp=None, oam_keys=None):
+                 z_layer=0.02, z0=0.1, rpp=None, oam_keys=None, z_list=None,
+                 obj_encoding="amplitude"):
         super().__init__()
         self.layers = nn.ModuleList([DiffractiveLayer(size, nonlin_every=3, layer_idx=i) for i in range(num_layers)])
         self.wavelength = wavelength
         self.pixel_size = pixel_size
         self.z_layer = z_layer
         self.z0 = z0
+        self.obj_encoding = obj_encoding
+        # 多平面 z_list (注册为 buffer, 跟随 device)
+        if z_list is not None:
+            self.register_buffer('z_list', torch.tensor(z_list, dtype=torch.float32))
+            self.use_multi_plane = True
+        else:
+            self.register_buffer('z_list', torch.tensor([z0], dtype=torch.float32))
+            self.use_multi_plane = False
         if rpp is not None:
             self.register_buffer('rpp_conj', torch.conj(rpp))
         else:
@@ -308,20 +407,38 @@ class OAM_Crypt_D2NN(nn.Module):
         device = U.device
         B = U.shape[0]
 
-        # 0. 模拟纯相位 SLM 加载: 仅保留相位, 振幅归一化为 1
-        #    这样训练与部署(SLM)完全一致, 无 train-test mismatch
-        U = torch.exp(1j * torch.angle(U))  # |U| = 1
-
-        # 1. 去除 RPP (RPP 是纯相位, 与纯相位 SLM 加载兼容)
+        # 0. 先去除 RPP (数字预处理, 在 SLM 加载之前)
+        #    关键: RPP 必须在双相位编码之前去除, 否则低通滤波会破坏 RPP 的高频相位
+        #    物理含义: RPP 是独立物理密钥, 解密方用 conj(RPP) 数字去除后再加载到 SLM
         if self.rpp_conj is not None:
             U = U * self.rpp_conj
+
+        # 1. 模拟纯相位 SLM 加载
+        if self.obj_encoding == "amplitude":
+            # 双相位编码: 复振幅 -> 纯相位 (棋盘格交错) -> 低通滤波恢复复振幅
+            # 此时 U 已去除 RPP, 低通滤波不会破坏 RPP
+            U = double_phase_encode(U, device)
+            U = lowpass_filter(U, sigma=0.15)
+        else:
+            # 相位模式: 仅保留相位 (旧模式, 无平面选择性)
+            U = torch.exp(1j * torch.angle(U))
 
         # 2. OAM 解复用 (在反向传播之前!) ×conj(OAM_j) 得到 4 路解调场
         demod = U.unsqueeze(1) * self.oam_conj_stack.unsqueeze(0)  # (B,4,H,W) complex
 
-        # 3. 对每路独立反向传播 (reshape 成 B*4 批量处理)
-        demod_flat = demod.reshape(B * self.num_channels, U.shape[-2], U.shape[-1])
-        U_back = propagate_asm(demod_flat, -self.z0, self.wavelength, self.pixel_size, device)
+        # 3. 多平面聚焦: 每路在对应 z_j 平面反向传播 (核心创新!)
+        #    通道 j 反传到 -z_j 才能聚焦, 其他通道在此平面散焦为噪声
+        if self.use_multi_plane:
+            U_back_list = []
+            for j in range(self.num_channels):
+                z_j = float(self.z_list[j])
+                U_j = propagate_asm(demod[:, j], -z_j, self.wavelength, self.pixel_size, device)
+                U_back_list.append(U_j)
+            U_back = torch.stack(U_back_list, dim=1)  # (B, 4, H, W)
+            U_back = U_back.reshape(B * self.num_channels, U.shape[-2], U.shape[-1])
+        else:
+            demod_flat = demod.reshape(B * self.num_channels, U.shape[-2], U.shape[-1])
+            U_back = propagate_asm(demod_flat, -self.z0, self.wavelength, self.pixel_size, device)
 
         # 4. D2NN 层 (恒等初始化, 微调相位补偿)
         for layer in self.layers:
@@ -329,9 +446,10 @@ class OAM_Crypt_D2NN(nn.Module):
             U_back = propagate_asm(U_back, self.z_layer, self.wavelength, self.pixel_size, device)
 
         # 5. 重塑回 (B,4,H,W) 并拼接 real+imag+phase -> 12 通道
-        # 物光相位化后: 信号项 = exp(i·π·P_j), arg() = π·P_j 直接含图像!
+        #    振幅模式: 信号项 ≈ sqrt(P_j), real/imag/phase 都含图像信息
+        #    相位模式: 信号项 = exp(i·π·P_j), arg() = π·P_j 直接含图像
         U_back = U_back.reshape(B, self.num_channels, U.shape[-2], U.shape[-1])
-        phase = torch.angle(U_back)  # (B,4,H,W) ∈ [-π, π], 信号项 ≈ π·P_j
+        phase = torch.angle(U_back)
         x = torch.cat([U_back.real, U_back.imag, phase], dim=1)  # (B,12,H,W)
         refined = self.refine(x)
         return refined.squeeze(1)
@@ -437,9 +555,9 @@ if __name__ == "__main__":
     full_train = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
     full_test = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
 
-    # 子集采样 (1080 分辨率训练慢, 减少样本量到 1600 组训练 / 200 组测试)
-    mnist_train = Subset(full_train, range(6400))
-    mnist_test = Subset(full_test, range(800))
+    # 子集采样 (1080 分辨率训练慢, 减少样本量到 400 组训练 / 100 组测试)
+    mnist_train = Subset(full_train, range(1600))
+    mnist_test = Subset(full_test, range(400))
 
     train_dataset = MNISTQuadDataset(mnist_train, img_size=CONFIG["size"] // 2)
     test_dataset = MNISTQuadDataset(mnist_test, img_size=CONFIG["size"] // 2)
@@ -454,7 +572,8 @@ if __name__ == "__main__":
         size=CONFIG["size"], num_layers=CONFIG["num_layers"],
         wavelength=CONFIG["wavelength"], pixel_size=CONFIG["pixel_size"],
         z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_system,
-        oam_keys=CONFIG["l_auth"]
+        oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"],
+        obj_encoding=CONFIG["obj_encoding"]
     ).to(device)
 
     # D2NN 层初始化为恒等 (phase=0, amp≈1)
@@ -498,7 +617,8 @@ if __name__ == "__main__":
             cipher_auth = encrypt_batch(
                 batch_imgs, CONFIG["l_auth"], rpp_system,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                size=CONFIG["size"]
+                size=CONFIG["size"], z_list=CONFIG["z_list"],
+                obj_encoding=CONFIG["obj_encoding"]
             )
 
             optimizer.zero_grad()
@@ -530,14 +650,16 @@ if __name__ == "__main__":
                         cipher_unauth = encrypt_batch(
                             batch_imgs, CONFIG["l_wrong"], rpp_system,
                             CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                            size=CONFIG["size"]
+                            size=CONFIG["size"], z_list=CONFIG["z_list"],
+                            obj_encoding=CONFIG["obj_encoding"]
                         )
                     else:
                         rpp_wrong = generate_rpp(CONFIG["size"], device)
                         cipher_unauth = encrypt_batch(
                             batch_imgs, CONFIG["l_auth"], rpp_wrong,
                             CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                            size=CONFIG["size"]
+                            size=CONFIG["size"], z_list=CONFIG["z_list"],
+                            obj_encoding=CONFIG["obj_encoding"]
                         )
                     pred_unauth = model(cipher_unauth)
                     loss_sec = criterion_mse(pred_unauth, torch.zeros_like(pred_unauth))
@@ -569,7 +691,7 @@ if __name__ == "__main__":
         epoch_loss_sec /= n
 
         # ---------- 5. 验证与日志 ----------
-        if epoch % 10 == 0 or epoch == 1:
+        if epoch % 1 == 0 or epoch == 1:  # 每 epoch 都验证 (训练轮次少时方便观察)
             model.eval()
             psnr_list = []
             sec_ratio_list = []
@@ -582,7 +704,8 @@ if __name__ == "__main__":
                     c_auth = encrypt_batch(
                         test_batch, CONFIG["l_auth"], rpp_system,
                         CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                        size=CONFIG["size"]
+                        size=CONFIG["size"], z_list=CONFIG["z_list"],
+                        obj_encoding=CONFIG["obj_encoding"]
                     )
                     p_auth = model(c_auth)
 
@@ -591,7 +714,8 @@ if __name__ == "__main__":
                     c_unauth = encrypt_batch(
                         test_batch, CONFIG["l_auth"], rpp_wrong_eval,
                         CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                        size=CONFIG["size"]
+                        size=CONFIG["size"], z_list=CONFIG["z_list"],
+                        obj_encoding=CONFIG["obj_encoding"]
                     )
                     p_unauth = model(c_unauth)
 

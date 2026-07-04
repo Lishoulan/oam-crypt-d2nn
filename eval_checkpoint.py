@@ -33,7 +33,7 @@ model = OAM_Crypt_D2NN(
     size=CONFIG["size"], num_layers=CONFIG["num_layers"],
     wavelength=CONFIG["wavelength"], pixel_size=CONFIG["pixel_size"],
     z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_system,
-    oam_keys=CONFIG["l_auth"]
+    oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"]
 ).to(device)
 
 ckpt_path = sys.argv[1] if len(sys.argv) > 1 else "oam_crypt_dnn_epoch_80.pth"
@@ -49,7 +49,8 @@ with torch.no_grad():
         tgt = build_target_grid(test_batch, device)
         c_auth = encrypt_batch(
             test_batch, CONFIG["l_auth"], rpp_system,
-            CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device
+            CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
+            z_list=CONFIG["z_list"]
         )
         p_auth = model(c_auth)
         psnr = calculate_psnr(p_auth, tgt).item()
@@ -60,7 +61,8 @@ with torch.no_grad():
             rpp_wrong = generate_rpp(CONFIG["size"], device)
             c_unauth = encrypt_batch(
                 test_batch, CONFIG["l_auth"], rpp_wrong,
-                CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device
+                CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
+                z_list=CONFIG["z_list"]
             )
             p_unauth = model(c_unauth)
             save_security_plot(
