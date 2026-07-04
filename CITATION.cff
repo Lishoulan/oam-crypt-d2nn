@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "OAM-Crypt-D2NN: 双密钥全光多用户信息加解密与隐写衍射神经网络"
+type: software
+authors:
+  - given-names: "Lishoulan"
+    alias: Lishoulan
+repository-code: "https://github.com/Lishoulan/oam-crypt-d2nn"
+version: "1.0.0"
+date-released: "2026-07-04"
+keywords:
+  - OAM
+  - orbital angular momentum
+  - diffractive neural network
+  - D2NN
+  - optical encryption
+  - steganography
+  - holography
+  - SLM
+  - spatial light modulator
+  - PyTorch
+  - double random phase encoding
+  - DRPE
+license: MIT
+abstract: >-
+  A PyTorch implementation of dual-key all-optical multi-user information
+  encryption/decryption and steganography diffractive neural network (D2NN).
+  Uses OAM (Orbital Angular Momentum) spiral phase as user-level addressing
+  key and RPP (Random Phase Plate) as system-level encryption key. Achieves
+  PSNR = 38.02 dB at 1080x1080 resolution, 532nm wavelength, with pure
+  phase SLM loading compatibility.
+preferred-citation:
+  type: software
+  authors:
+    - given-names: "Lishoulan"
+      alias: Lishoulan
+  title: "OAM-Crypt-D2NN"
+  year: 2026
+  url: "https://github.com/Lishoulan/oam-crypt-d2nn"
