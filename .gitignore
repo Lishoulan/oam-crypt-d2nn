@@ -1,0 +1,20 @@
+# 数据集
+data/
+__pycache__/
+*.pyc
+
+# PyTorch checkpoint (除 epoch_20 外其他都排除, 避免仓库过大)
+*.pth
+!oam_crypt_dnn_epoch_20.pth
+!rpp_system.pt
+
+# 系统/IDE 文件
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.log
+*.tmp
