@@ -3,9 +3,9 @@ data/
 __pycache__/
 *.pyc
 
-# PyTorch checkpoint (除 epoch_5 外其他都排除, 避免仓库过大)
+# PyTorch checkpoint (除最新 epoch_40 外其他都排除, 避免仓库过大)
 *.pth
-!oam_crypt_dnn_epoch_5.pth
+!oam_crypt_dnn_epoch_40.pth
 !rpp_system.pt
 
 # 系统/IDE 文件

@@ -36,14 +36,14 @@ def main():
     torch.manual_seed(42)
     np.random.seed(42)
 
-    ckpt = sys.argv[1] if len(sys.argv) > 1 else "oam_crypt_dnn_epoch_20.pth"
+    ckpt = sys.argv[1] if len(sys.argv) > 1 else "oam_crypt_dnn_epoch_40.pth"
     os.makedirs(SLM_CONFIG["output_dir"], exist_ok=True)
 
     # 1. 数据 + RPP + 模型
     transform = transforms.Compose([transforms.ToTensor()])
     full_test = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
     mnist_test = Subset(full_test, range(8))
-    test_dataset = MNISTQuadDataset(mnist_test, img_size=CONFIG["size"] // 2)
+    test_dataset = MNISTQuadDataset(mnist_test, img_size=CONFIG["size"] // 4)  # 匹配训练配置 (size//4, 增强 OAM 正交性)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     rpp_system = generate_rpp(CONFIG["size"], device)
@@ -131,61 +131,40 @@ def main():
     plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
     plt.rcParams['axes.unicode_minus'] = False
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
 
     # 行 1: 加密流程
     # 密文振幅
     amp = torch.abs(U_cipher[0]).cpu().numpy()
     im0 = axes[0, 0].imshow(amp, cmap='gray')
-    axes[0, 0].set_title(f"Cipher |U| (复振幅振幅)\n范围 [{amp.min():.3f}, {amp.max():.3f}]\n"
-                         f"(SLM 丢弃, 不加载)")
+    axes[0, 0].set_title(f"Cipher |U| (复振幅振幅)\n范围 [{amp.min():.3f}, {amp.max():.3f}]\n(SLM 丢弃)")
     plt.colorbar(im0, ax=axes[0, 0], fraction=0.046)
 
     # 密文相位 (= SLM 加载内容)
     im1 = axes[0, 1].imshow(phase, cmap='twilight', vmin=-np.pi, vmax=np.pi)
-    axes[0, 1].set_title(f"Cipher arg(U) = SLM 加载内容\n"
-                         f"范围 [-π, π] rad\n"
-                         f"(纯相位 SLM 唯一加载的物理量)")
+    axes[0, 1].set_title(f"SLM 加载相位 arg(U)\n范围 [-pi, pi] rad\n(纯相位 SLM)")
     plt.colorbar(im1, ax=axes[0, 1], fraction=0.046)
 
     # SLM 加载的 8-bit 灰度图
     im2 = axes[0, 2].imshow(gray_size, cmap='gray', vmin=0, vmax=255)
-    axes[0, 2].set_title(f"SLM 加载灰度图 ({size}×{size})\n"
-                         f"gray = (phase+π)/(2π)×255\n"
-                         f"范围 [0, 255] uint8")
+    axes[0, 2].set_title(f"SLM 灰度图 ({size}x{size})\n[0, 255] uint8")
     plt.colorbar(im2, ax=axes[0, 2], fraction=0.046)
 
-    # 行 2: 解密结果 + SLM 全图
-    # 解密结果
-    pred_np = pred_full[0].clamp(0, 1).cpu().numpy()
-    axes[1, 0].imshow(pred_np, cmap='gray', vmin=0, vmax=1)
-    axes[1, 0].set_title(f"双相位 SLM 解密结果\n"
-                         f"PSNR = {psnr_dp:.2f} dB\n"
-                         f"({size}×{size}, 4 通道拼图)")
-
-    # 4 个象限放大
-    half = size // 2
-    quads = [
-        pred_np[0:half, 0:half], pred_np[0:half, half:size],
-        pred_np[half:size, 0:half], pred_np[half:size, half:size]
-    ]
-    combined = np.concatenate([
-        np.concatenate([quads[0], quads[1]], axis=1),
-        np.concatenate([quads[2], quads[3]], axis=1)
-    ], axis=0)
-    axes[1, 1].imshow(combined, cmap='gray', vmin=0, vmax=1)
-    axes[1, 1].set_title(f"解密 4 通道 (放大)\n"
-                         f"左上=Ch0, 右上=Ch1\n左下=Ch2, 右下=Ch3")
-
     # SLM 全屏图
-    axes[1, 2].imshow(canvas, cmap='gray', vmin=0, vmax=255)
-    axes[1, 2].set_title(f"SLM 全屏加载图 ({SLM_CONFIG['width']}×{SLM_CONFIG['height']})\n"
-                         f"全息图水平居中, 高度占满")
+    axes[0, 3].imshow(canvas, cmap='gray', vmin=0, vmax=255)
+    axes[0, 3].set_title(f"SLM 全屏 ({SLM_CONFIG['width']}x{SLM_CONFIG['height']})\n全息图水平居中")
     rect = plt.Rectangle((x0, y0), size, size, linewidth=2,
                          edgecolor='r', facecolor='none')
-    axes[1, 2].add_patch(rect)
-    axes[1, 2].text(x0 + size // 2, y0 - 30, "Hologram", color='r',
+    axes[0, 3].add_patch(rect)
+    axes[0, 3].text(x0 + size // 2, y0 - 30, "Hologram", color='r',
                     ha='center', fontsize=10)
+
+    # 行 2: 4 通道解密结果 (4 个图像在同一位置, 不同 OAM/z 平面)
+    pred_np = pred_full[0].clamp(0, 1).cpu().numpy()  # (4, H, W)
+    for i in range(4):
+        axes[1, i].imshow(pred_np[i], cmap='gray', vmin=0, vmax=1)
+        axes[1, i].set_title(f"Ch{i} (OAM l={CONFIG['l_auth'][i]}, z={CONFIG['z_list'][i]:.2f}m)\n"
+                             f"PSNR = {psnr_dp:.2f} dB")
 
     plt.tight_layout()
     overview_path = os.path.join(SLM_CONFIG["output_dir"], "slm_overview.png")

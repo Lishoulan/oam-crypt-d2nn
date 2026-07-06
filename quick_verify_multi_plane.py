@@ -30,6 +30,8 @@ oam_crypt_d2nn.CONFIG.update({
     "mid_ch": 32,
     "num_layers": 0,
     "obj_encoding": "amplitude",
+    "l_auth": [-7, -3, 3, 7],   # 增大 OAM 差异 (正交性更好)
+    "l_wrong": [-5, -1, 1, 5],
 })
 from oam_crypt_d2nn import (
     CONFIG, generate_rpp, generate_oam_phase, encrypt_batch,
@@ -53,7 +55,7 @@ def main():
     transform = transforms.Compose([transforms.ToTensor()])
     full_train = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
     mnist_train = Subset(full_train, range(64))
-    train_dataset = MNISTQuadDataset(mnist_train, img_size=size // 2)
+    train_dataset = MNISTQuadDataset(mnist_train, img_size=size // 4)  # 小区域增强OAM正交性
     train_loader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"], shuffle=True)
 
     # 2. RPP + 模型
@@ -69,9 +71,9 @@ def main():
     criterion = nn.MSELoss()
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
 
-    # 3. 快速训练 2 epoch
-    print("\n[训练] 2 epoch 快速验证...")
-    for epoch in range(CONFIG["epochs"]):
+    # 3. 训练 60 epoch (纯 MSE, 图像 size//4 增强OAM正交性)
+    print(f"\n[训练] 60 epoch (纯 MSE, 图像区域 {size//4}x{size//4}, OAM={CONFIG['l_auth']})")
+    for epoch in range(60):
         model.train()
         epoch_loss = 0.0
         n = 0
@@ -91,14 +93,26 @@ def main():
             optimizer.step()
             epoch_loss += loss.item() * batch_imgs.shape[0]
             n += batch_imgs.shape[0]
-        print(f"  Epoch {epoch+1}/{CONFIG['epochs']}: loss = {epoch_loss/n:.6f}")
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            model.eval()
+            with torch.no_grad():
+                tb = next(iter(train_loader)).to(device)
+                tgt = build_target_grid(tb, device, size=size)
+                cp = encrypt_batch(tb, CONFIG["l_auth"], rpp_system,
+                    CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
+                    size=size, z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"])
+                pp = model(cp)
+                psnr = calculate_psnr(pp, tgt).item()
+            model.train()
+            print(f"  Epoch {epoch+1}/60: loss = {epoch_loss/n:.6f}, PSNR = {psnr:.2f} dB")
+        else:
+            print(f"  Epoch {epoch+1}/60: loss = {epoch_loss/n:.6f}")
 
     # 4. 验证多平面物理特性 (纯物理, 不用 U-Net)
     print("\n[物理验证] 多平面 OAM 复用全息特性 (纯物理光路, 无 U-Net)")
     print("  使用 sqrt(P) 振幅编码 + 双相位编码 (纯相位 SLM 兼容)")
+    print("  4 个图像都在中心同一位置 (多平面复用, 不分象限)")
     model.eval()
-    half = size // 2
-    quad_pos = [(0, 0), (0, half), (half, 0), (half, half)]
 
     with torch.no_grad():
         batch_imgs = next(iter(train_loader)).to(device)
@@ -118,38 +132,49 @@ def main():
         )
 
         # 模拟纯相位 SLM 加载: 先去除 RPP, 再双相位编码 + 低通滤波
-        # (RPP 必须在双相位编码之前去除, 否则低通滤波破坏 RPP 高频)
-        U_correct = cipher_correct[0] * torch.conj(rpp_system)  # 去除 RPP
-        U_correct = double_phase_encode(U_correct, device)      # 双相位编码
-        U_correct = lowpass_filter(U_correct, sigma=0.15)        # 低通滤波恢复
+        U_correct = cipher_correct[0] * torch.conj(rpp_system)
+        U_correct = double_phase_encode(U_correct, device)
+        U_correct = lowpass_filter(U_correct, sigma=0.15)
 
         U_wrong = cipher_wrong[0] * torch.conj(rpp_system)
         U_wrong = double_phase_encode(U_wrong, device)
         U_wrong = lowpass_filter(U_wrong, sigma=0.15)
 
         # 对 4 个 OAM_j 解调, 在 4 个 z_k 平面采样
+        # 4 个图像都在中心同一位置, 用归一化互相关衡量图像可见度
+        # (正确平面: |U|² ≈ P_j, 相关性高; 错误平面: 散焦, 相关性低)
+        img_size = batch_imgs.shape[-1]
+        cy = (size - img_size) // 2
+        cx = (size - img_size) // 2
         planes_correct = np.zeros((4, 4))
         planes_wrong = np.zeros((4, 4))
+
+        def norm_corr(a, b):
+            """归一化互相关: 衡量 a 与 b 的相似度, 范围 [-1, 1]"""
+            a = a.float() - a.float().mean()
+            b = b.float() - b.float().mean()
+            denom = (a.std() * b.std() + 1e-8)
+            return (a * b).mean() / denom
 
         for j, l in enumerate(CONFIG["l_auth"]):
             oam_conj = torch.conj(generate_oam_phase(size, l, device))
             U_demod_correct = U_correct * oam_conj
             U_demod_wrong = U_wrong * oam_conj
+            target_j = batch_imgs[0, j]  # 目标图像 j
             for k, z_k in enumerate(CONFIG["z_list"]):
                 U_at_z_c = propagate_asm(U_demod_correct, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device)
                 U_at_z_w = propagate_asm(U_demod_wrong, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device)
-                # 取 j 象限的能量 (加密时 j 图放在 j 象限, 解调后也在 j 象限聚焦)
-                qy_j, qx_j = quad_pos[j]
-                energy_c = (U_at_z_c.real[qy_j:qy_j+half, qx_j:qx_j+half] ** 2 +
-                            U_at_z_c.imag[qy_j:qy_j+half, qx_j:qx_j+half] ** 2).mean().item()
-                energy_w = (U_at_z_w.real[qy_j:qy_j+half, qx_j:qx_j+half] ** 2 +
-                            U_at_z_w.imag[qy_j:qy_j+half, qx_j:qx_j+half] ** 2).mean().item()
-                planes_correct[j, k] = energy_c
-                planes_wrong[j, k] = energy_w
+                # 中心区域的强度 |U|² 与目标图像 P_j 的相关性
+                I_c = (U_at_z_c.real[cy:cy+img_size, cx:cx+img_size] ** 2 +
+                       U_at_z_c.imag[cy:cy+img_size, cx:cx+img_size] ** 2)
+                I_w = (U_at_z_w.real[cy:cy+img_size, cx:cx+img_size] ** 2 +
+                       U_at_z_w.imag[cy:cy+img_size, cx:cx+img_size] ** 2)
+                planes_correct[j, k] = norm_corr(I_c, target_j).item()
+                planes_wrong[j, k] = norm_corr(I_w, target_j).item()
 
     # 5. 打印结果
     z_labels = [f'z={z:.2f}m' for z in CONFIG["z_list"]]
-    print("\n[正确 OAM 密文] 各 (OAM_j, z_k) 在 j 象限的能量:")
+    print("\n[正确 OAM 密文] 各 (OAM_j 解调, z_k 平面) 与目标图像 j 的相关性:")
     print(f"{'OAM_j \\ z_k':<15}", end='')
     for k in range(4):
         print(f'{z_labels[k]:<14}', end='')
@@ -161,14 +186,14 @@ def main():
             print(f'{planes_correct[j,k]:<10.4f}{mark}', end='  ')
         print('  <- 对角线应高')
 
-    print(f"\n[错误 OAM 密文] 各 (OAM_j, z_k) 在 j 象限的能量 (应全低):")
+    print(f"\n[错误 OAM 密文] 各 (OAM_j 解调, z_k 平面) 与目标图像 j 的相关性 (应全低):")
     for j in range(4):
         print(f'l={CONFIG["l_auth"][j]:<13}', end='')
         for k in range(4):
             print(f'{planes_wrong[j,k]:<10.4f}  ', end='  ')
         print()
 
-    # 6. 功能验证
+    # 6. 功能验证 (用相关性: 范围 [-1,1], 越高越相似)
     diag = np.mean(np.diag(planes_correct))
     offdiag = (planes_correct.sum() - np.trace(planes_correct).sum()) / 12
     wrong_mean = planes_wrong.mean()
@@ -179,12 +204,12 @@ def main():
     print("功能验证结果:")
     print("=" * 60)
     print(f"\n功能1 (不同平面不同图案):")
-    print(f"  对角线 (j==k) 平均能量 = {diag:.4f}")
-    print(f"  非对角线 (j!=k) 平均能量 = {offdiag:.4f}")
+    print(f"  对角线 (j==k) 平均相关性 = {diag:.4f}")
+    print(f"  非对角线 (j!=k) 平均相关性 = {offdiag:.4f}")
     print(f"  对比度 = {contrast:.2f}x  {'✓' if contrast > 1.3 else '✗'}")
 
     print(f"\n功能2 (错误 OAM 看不到图像):")
-    print(f"  错误密文平均能量 = {wrong_mean:.4f}")
+    print(f"  错误密文平均相关性 = {wrong_mean:.4f}")
     print(f"  安全比 = {sec_ratio:.4f}  {'✓' if sec_ratio < 0.8 else '✗'}")
 
     print(f"\n功能3 (正确 OAM 只看对应平面):")

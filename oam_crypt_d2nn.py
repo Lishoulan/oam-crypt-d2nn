@@ -45,12 +45,11 @@ CONFIG = {
     # 总行程控制在 30cm 以内, 用递增间距保证相邻平面有足够 defocus
     "z_list": [0.05, 0.13, 0.22, 0.30],  # 4 个平面 (米), 间距 8-9cm, 总行程 25cm
     "z_layer": 0.02,          # D2NN 相位层之间的传播距离
-    "l_auth": [-3, -1, 1, 3], # 4 个授权 OAM 寻址密钥
-    "l_wrong": [-2, 0, 2, 4], # 错误 OAM 密钥(用于非法输入构造)
+    "l_auth": [-7, -3, 3, 7], # 增大 OAM 差异 (正交性更好, 串扰更低)
+    "l_wrong": [-5, -1, 1, 5], # 错误 OAM 密钥(用于非法输入构造)
     "batch_size": 2,           # 批大小 (1080x1080 显存大, 用小批)
-    "epochs": 5,              # 训练轮次 (每 epoch ~57min, 5 epoch 约 5h)
-
-    "lr": 1e-3,               # U-Net 精修层学习率
+    "epochs": 40,              # 训练轮次 (同位置复用需更多 epoch 收敛)
+    "lr": 1e-3,                # U-Net 精修层学习率
     "lr_d2nn": 0.1,           # D2NN 物理层学习率
     "mid_ch": 64,             # U-Net 中间通道数 (1080 大, 减通道省显存)
     "num_layers": 0,          # 衍射层数 (0=不用D2NN)
@@ -204,37 +203,30 @@ def encrypt_batch(batch_imgs, oam_keys, rpp, z0, wavelength, pixel_size, device,
                   size=1080, z_list=None, obj_encoding="amplitude"):
     """
     双密钥加密引擎(支持授权/未授权两种模式，由传入的 oam_keys / rpp 决定)
-    - 输入: batch_imgs (B, 4, S, S) 明文振幅图 (S 由调用方决定)
+    - 输入: batch_imgs (B, 4, S, S) 明文振幅图 (S = size//2, 由调用方决定)
     - 输出: U_cipher (B, size, size) 复数密文场
 
-    物光编码模式:
-      "amplitude": U_obj = sqrt(P)  → |U_obj|=sqrt(P), 图像在振幅中
-                   => 传播后不同平面有不同强度分布 → 多平面选择性 ✓
-                   => 配合双相位编码兼容纯相位 SLM ✓
-      "phase":     U_obj = exp(iπP) → |U_obj|≡1, 图像在相位中
-                   => 强度守恒, 无平面选择性 ✗ (但天然纯相位)
-
     多平面 OAM 复用全息 (核心创新):
-      - 若传入 z_list (4 个不同距离), 每路 OAM 通道用不同传播距离 z_i
+      - 4 个图像都放在画面中心同一位置 (不分象限, 真正的复用全息)
+      - 每路 OAM 通道用不同传播距离 z_i
       - 解密时只有用对应 conj(OAM_j) 解调 + 在 z_j 平面观察才能看到图像 j
-      - 错误 OAM 或错误平面都看不到清晰图像
+      - 不同平面的图案在同一位置出现, 不会错开
     向后兼容: 若 z_list=None, 则所有路都用 z0 (旧行为)
     """
     B = batch_imgs.shape[0]
     U_sum = torch.zeros(B, size, size, dtype=torch.complex64, device=device)
-    half = size // 2
-    quad_pos = [(0, 0), (0, half), (half, 0), (half, half)]
+    half = batch_imgs.shape[-1]  # 图像尺寸 (可能 = size//2)
+    # 4 个图像都放在中心同一位置 (多平面 OAM 复用全息的关键!)
+    cy = (size - half) // 2
+    cx = (size - half) // 2
 
     for i, l in enumerate(oam_keys):
         img_pad = torch.zeros(B, size, size, device=device)
-        py, px = quad_pos[i]
-        img_pad[:, py:py+half, px:px+half] = batch_imgs[:, i]
+        img_pad[:, cy:cy+half, cx:cx+half] = batch_imgs[:, i]
 
         if obj_encoding == "phase":
-            # 相位编码: |U_obj|≡1 (旧模式, 无平面选择性)
             U_obj = torch.exp(1j * np.pi * img_pad)
         else:
-            # 振幅编码: |U_obj|=sqrt(P) (新模式, 有平面选择性)
             U_obj = torch.sqrt(img_pad).to(torch.complex64)
 
         z_i = z_list[i] if z_list is not None else z0
@@ -249,15 +241,16 @@ def encrypt_batch(batch_imgs, oam_keys, rpp, z0, wavelength, pixel_size, device,
 
 def build_target_grid(batch_imgs, device, size=1080):
     """
-    将 4 张明文拼装为 size×size 的 2x2 目标网格
+    构建 (B, 4, size, size) 目标: 每个通道对应一个图像, 都在中心同一位置
+    (与 encrypt_batch 的图像放置位置一致, 多平面 OAM 复用全息)
     """
     B = batch_imgs.shape[0]
-    target = torch.zeros(B, size, size, device=device)
-    half = size // 2
-    target[:, 0:half, 0:half] = batch_imgs[:, 0]            # 左上 -> 通道0
-    target[:, 0:half, half:size] = batch_imgs[:, 1]        # 右上 -> 通道1
-    target[:, half:size, 0:half] = batch_imgs[:, 2]        # 左下 -> 通道2
-    target[:, half:size, half:size] = batch_imgs[:, 3]      # 右下 -> 通道3
+    target = torch.zeros(B, 4, size, size, device=device)
+    half = batch_imgs.shape[-1]
+    cy = (size - half) // 2
+    cx = (size - half) // 2
+    for i in range(4):
+        target[:, i, cy:cy+half, cx:cx+half] = batch_imgs[:, i]
     return target
 
 
@@ -401,7 +394,8 @@ class OAM_Crypt_D2NN(nn.Module):
             oam_conj_stack = torch.stack([torch.conj(generate_oam_phase(size, l, 'cpu')) for l in CONFIG["l_auth"]])
         self.register_buffer('oam_conj_stack', oam_conj_stack)
         self.num_channels = len(oam_keys) if oam_keys is not None else len(CONFIG["l_auth"])
-        self.refine = UNetRefine(in_ch=12, out_ch=1, mid_ch=CONFIG["mid_ch"])
+        # out_ch = num_channels: 每个通道输出一个图像, 都在同一位置 (多平面复用)
+        self.refine = UNetRefine(in_ch=12, out_ch=self.num_channels, mid_ch=CONFIG["mid_ch"])
 
     def forward(self, U):
         device = U.device
@@ -447,12 +441,11 @@ class OAM_Crypt_D2NN(nn.Module):
 
         # 5. 重塑回 (B,4,H,W) 并拼接 real+imag+phase -> 12 通道
         #    振幅模式: 信号项 ≈ sqrt(P_j), real/imag/phase 都含图像信息
-        #    相位模式: 信号项 = exp(i·π·P_j), arg() = π·P_j 直接含图像
         U_back = U_back.reshape(B, self.num_channels, U.shape[-2], U.shape[-1])
         phase = torch.angle(U_back)
         x = torch.cat([U_back.real, U_back.imag, phase], dim=1)  # (B,12,H,W)
-        refined = self.refine(x)
-        return refined.squeeze(1)
+        refined = self.refine(x)  # (B, 4, H, W) 每通道一个图像
+        return refined  # (B, 4, H, W)
 
 
 # ==========================================
@@ -490,45 +483,32 @@ def _to_np(x):
 def save_security_plot(cipher_auth, pred_auth, target_auth,
                        cipher_unauth, pred_unauth, path="final_security_plot.png"):
     """
-    绘制三行对比图:
-      行1: 正确密钥流 [密文强度 | 4 个解密通道]
+    绘制三行对比图 (4 通道独立输出, 图像在同一位置):
+      行1: 正确密钥流 [密文强度 | 4 个解密通道 (同一位置不同图案)]
       行2: 错误密钥流 [密文强度 | 4 个解密噪声]
       行3: 原始明文标签 [4 个通道]
+    pred/target 形状: (B, 4, H, W)
     """
-    S = pred_auth.shape[-1]
-    H = S // 2
     fig, axes = plt.subplots(3, 5, figsize=(15, 9))
 
     # 行1: 正确密钥解密流
     axes[0, 0].imshow(np.abs(_to_np(cipher_auth[0])), cmap='gray')
     axes[0, 0].set_title("Cipher (Auth)")
-    auth_quads = [
-        pred_auth[0, 0:H, 0:H], pred_auth[0, 0:H, H:S],
-        pred_auth[0, H:S, 0:H], pred_auth[0, H:S, H:S]
-    ]
     for i in range(4):
-        axes[0, i + 1].imshow(_to_np(auth_quads[i]), cmap='gray', vmin=0, vmax=1)
+        axes[0, i + 1].imshow(_to_np(pred_auth[0, i]), cmap='gray', vmin=0, vmax=1)
         axes[0, i + 1].set_title(f"Decrypted Ch{i} (Auth)")
 
     # 行2: 错误密钥解密流
     axes[1, 0].imshow(np.abs(_to_np(cipher_unauth[0])), cmap='gray')
     axes[1, 0].set_title("Cipher (Wrong Key)")
-    unauth_quads = [
-        pred_unauth[0, 0:H, 0:H], pred_unauth[0, 0:H, H:S],
-        pred_unauth[0, H:S, 0:H], pred_unauth[0, H:S, H:S]
-    ]
     for i in range(4):
-        axes[1, i + 1].imshow(_to_np(unauth_quads[i]), cmap='gray', vmin=0, vmax=1)
+        axes[1, i + 1].imshow(_to_np(pred_unauth[0, i]), cmap='gray', vmin=0, vmax=1)
         axes[1, i + 1].set_title(f"Decrypted Ch{i} (Wrong)")
 
     # 行3: 原始明文标签
-    tgt_quads = [
-        target_auth[0, 0:H, 0:H], target_auth[0, 0:H, H:S],
-        target_auth[0, H:S, 0:H], target_auth[0, H:S, H:S]
-    ]
     axes[2, 0].axis('off')
     for i in range(4):
-        axes[2, i + 1].imshow(_to_np(tgt_quads[i]), cmap='gray', vmin=0, vmax=1)
+        axes[2, i + 1].imshow(_to_np(target_auth[0, i]), cmap='gray', vmin=0, vmax=1)
         axes[2, i + 1].set_title(f"Plaintext Ch{i}")
 
     for ax in axes.ravel():
@@ -556,11 +536,12 @@ if __name__ == "__main__":
     full_test = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
 
     # 子集采样 (1080 分辨率训练慢, 减少样本量到 400 组训练 / 100 组测试)
-    mnist_train = Subset(full_train, range(1600))
-    mnist_test = Subset(full_test, range(400))
+    mnist_train = Subset(full_train, range(800))
+    mnist_test = Subset(full_test, range(200))
 
-    train_dataset = MNISTQuadDataset(mnist_train, img_size=CONFIG["size"] // 2)
-    test_dataset = MNISTQuadDataset(mnist_test, img_size=CONFIG["size"] // 2)
+    # 图像区域 size//4 (270x270), 中心放置, 外围留空增强 OAM 正交性
+    train_dataset = MNISTQuadDataset(mnist_train, img_size=CONFIG["size"] // 4)
+    test_dataset = MNISTQuadDataset(mnist_test, img_size=CONFIG["size"] // 4)
     train_loader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"], shuffle=True, num_workers=2, persistent_workers=True)
     test_loader = DataLoader(test_dataset, batch_size=CONFIG["batch_size"], shuffle=False, num_workers=2, persistent_workers=True)
 
@@ -634,16 +615,12 @@ if __name__ == "__main__":
                 loss_sec = torch.tensor(0.0, device=device)
 
                 if use_security:
-                    half = CONFIG["size"] // 2
-                    full = CONFIG["size"]
-                    rec_quads = [pred_auth[:, 0:half, 0:half], pred_auth[:, 0:half, half:full],
-                                 pred_auth[:, half:full, 0:half], pred_auth[:, half:full, half:full]]
-                    tgt_quads = [target[:, 0:half, 0:half], target[:, 0:half, half:full],
-                                 target[:, half:full, 0:half], target[:, half:full, half:full]]
+                    # 通道间串扰: pred_auth[:, i] 不应包含 target[:, j] (i!=j)
+                    # 现在 4 个图像都在中心同一位置, 串扰 = 不同通道间的内容泄漏
                     for i in range(4):
                         for j in range(4):
                             if i != j:
-                                loss_xtalk = loss_xtalk + torch.mean(rec_quads[i] * tgt_quads[j])
+                                loss_xtalk = loss_xtalk + torch.mean(pred_auth[:, i] * target[:, j])
 
                     use_wrong_oam = torch.rand(1).item() < 0.5
                     if use_wrong_oam:
