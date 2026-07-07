@@ -30,8 +30,8 @@ oam_crypt_d2nn.CONFIG.update({
     "mid_ch": 32,
     "num_layers": 0,
     "obj_encoding": "amplitude",
-    "l_auth": [-7, -3, 3, 7],   # 增大 OAM 差异 (正交性更好)
-    "l_wrong": [-5, -1, 1, 5],
+    "l_auth": [-15, -5, 5, 15],   # 与 1080 训练一致 (增大 OAM 差异)
+    "l_wrong": [-13, -9, 9, 13],
 })
 from oam_crypt_d2nn import (
     CONFIG, generate_rpp, generate_oam_phase, encrypt_batch,

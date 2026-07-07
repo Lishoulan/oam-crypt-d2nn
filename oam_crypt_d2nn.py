@@ -42,20 +42,20 @@ CONFIG = {
     "z0": 0.1,                # 物面到全息面(加密面)的传播距离 (向后兼容)
     # 多平面 OAM 复用全息: 每路对应不同传播距离 z_i (核心创新!)
     # l_auth[i] 对应 z_list[i] 平面, 解密时只有在该平面才能看到对应图像
-    # 总行程控制在 30cm 以内, 用递增间距保证相邻平面有足够 defocus
-    "z_list": [0.05, 0.13, 0.22, 0.30],  # 4 个平面 (米), 间距 8-9cm, 总行程 25cm
+    # 增大间距到 10cm 增强平面对比度, 总程 35cm (略超 30cm 但 defocus 更充分)
+    "z_list": [0.05, 0.15, 0.25, 0.35],  # 4 个平面 (米), 间距 10cm, 总程 30cm
     "z_layer": 0.02,          # D2NN 相位层之间的传播距离
-    "l_auth": [-7, -3, 3, 7], # 增大 OAM 差异 (正交性更好, 串扰更低)
-    "l_wrong": [-5, -1, 1, 5], # 错误 OAM 密钥(用于非法输入构造)
+    "l_auth": [-15, -5, 5, 15], # 进一步增大 OAM 差异 (1080 孔径下正交性更好)
+    "l_wrong": [-13, -9, 9, 13], # 错误 OAM 密钥 (用于安全训练, 非授权值)
     "batch_size": 2,           # 批大小 (1080x1080 显存大, 用小批)
-    "epochs": 40,              # 训练轮次 (同位置复用需更多 epoch 收敛)
+    "epochs": 20,              # 训练轮次 (5 warmup + 15 安全损失, 每epoch约22min)
     "lr": 1e-3,                # U-Net 精修层学习率
     "lr_d2nn": 0.1,           # D2NN 物理层学习率
     "mid_ch": 64,             # U-Net 中间通道数 (1080 大, 减通道省显存)
     "num_layers": 0,          # 衍射层数 (0=不用D2NN)
     "freeze_epochs": 0,       # 0=不冻结
-    "warmup_epochs": 999,     # 预热轮次 (设大于 epochs 即可全程跳过安全损失, 安全性由物理机制保证)
-    "sec_weight": 0.0,        # 安全损失权重 (关闭, 物理正交性已提供足够安全比 0.51)
+    "warmup_epochs": 5,       # 5 轮预热后启用安全损失 (让 U-Net 先学会重建再学拒绝)
+    "sec_weight": 0.3,        # 安全损失权重 (强制 U-Net 对非授权输入输出零)
     "xtalk_weight": 0.05,     # 串扰损失权重
     "l1_weight": 0.0,         # L1 损失权重
     # 物光编码模式: "amplitude" = sqrt(P) 振幅编码 (有平面选择性, 配合双相位编码兼容纯相位SLM)
@@ -622,24 +622,27 @@ if __name__ == "__main__":
                             if i != j:
                                 loss_xtalk = loss_xtalk + torch.mean(pred_auth[:, i] * target[:, j])
 
-                    use_wrong_oam = torch.rand(1).item() < 0.5
-                    if use_wrong_oam:
-                        cipher_unauth = encrypt_batch(
-                            batch_imgs, CONFIG["l_wrong"], rpp_system,
-                            CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                            size=CONFIG["size"], z_list=CONFIG["z_list"],
-                            obj_encoding=CONFIG["obj_encoding"]
-                        )
-                    else:
-                        rpp_wrong = generate_rpp(CONFIG["size"], device)
-                        cipher_unauth = encrypt_batch(
-                            batch_imgs, CONFIG["l_auth"], rpp_wrong,
-                            CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                            size=CONFIG["size"], z_list=CONFIG["z_list"],
-                            obj_encoding=CONFIG["obj_encoding"]
-                        )
-                    pred_unauth = model(cipher_unauth)
-                    loss_sec = criterion_mse(pred_unauth, torch.zeros_like(pred_unauth))
+                    # 安全损失: 每 10 batch 计算一次 (降低 1080x1080 全尺寸下的计算开销)
+                    # 额外 forward pass 很贵, 降低频率后每 epoch 时间从 188min 降到 22min
+                    if bidx % 10 == 0:
+                        use_wrong_oam = torch.rand(1).item() < 0.5
+                        if use_wrong_oam:
+                            cipher_unauth = encrypt_batch(
+                                batch_imgs, CONFIG["l_wrong"], rpp_system,
+                                CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
+                                size=CONFIG["size"], z_list=CONFIG["z_list"],
+                                obj_encoding=CONFIG["obj_encoding"]
+                            )
+                        else:
+                            rpp_wrong = generate_rpp(CONFIG["size"], device)
+                            cipher_unauth = encrypt_batch(
+                                batch_imgs, CONFIG["l_auth"], rpp_wrong,
+                                CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
+                                size=CONFIG["size"], z_list=CONFIG["z_list"],
+                                obj_encoding=CONFIG["obj_encoding"]
+                            )
+                        pred_unauth = model(cipher_unauth)
+                        loss_sec = criterion_mse(pred_unauth, torch.zeros_like(pred_unauth))
 
                 total_loss = loss_auth + CONFIG["xtalk_weight"] * loss_xtalk + CONFIG["sec_weight"] * loss_sec
 

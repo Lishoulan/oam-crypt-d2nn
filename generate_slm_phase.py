@@ -36,7 +36,7 @@ def main():
     torch.manual_seed(42)
     np.random.seed(42)
 
-    ckpt = sys.argv[1] if len(sys.argv) > 1 else "oam_crypt_dnn_epoch_40.pth"
+    ckpt = sys.argv[1] if len(sys.argv) > 1 else "oam_crypt_dnn_epoch_10.pth"
     os.makedirs(SLM_CONFIG["output_dir"], exist_ok=True)
 
     # 1. 数据 + RPP + 模型
