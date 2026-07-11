@@ -56,22 +56,33 @@ def main():
     # 1. 数据 + RPP + 模型
     transform = transforms.Compose([transforms.ToTensor()])
     full_test = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-    mnist_test = Subset(full_test, range(8))
+    mnist_test = Subset(full_test, range(50))  # 50 样本统计 (训练用 200, 这里折中平衡速度)
     test_dataset = MNISTQuadDataset(mnist_test, img_size=size // 4)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-    rpp_system = generate_rpp(size, device)
+    rpp_placeholder = generate_rpp(size, device)  # 占位, 实际从 checkpoint 恢复
+    theta_max_rad = np.deg2rad(CONFIG["theta_max_deg"]) if CONFIG.get("theta_max_deg") else None
 
     model = OAM_Crypt_D2NN(
         size=size, num_layers=CONFIG["num_layers"],
         wavelength=CONFIG["wavelength"], pixel_size=CONFIG["pixel_size"],
-        z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_system,
+        z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_placeholder,
         oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"],
-        obj_encoding=CONFIG["obj_encoding"]
+        obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
     ).to(device)
-    model.load_state_dict(torch.load("oam_crypt_dnn_epoch_10.pth", map_location=device))
+    ckpt_path = sys.argv[1] if len(sys.argv) > 1 else "oam_crypt_dnn_epoch_18.pth"  # 最佳模型 (3层D2NN)
+    ckpt_data = torch.load(ckpt_path, map_location=device)
+    if isinstance(ckpt_data, dict) and 'model_state_dict' in ckpt_data:
+        model.load_state_dict(ckpt_data['model_state_dict'])
+        print(f"已加载: {ckpt_path} (PSNR={ckpt_data.get('psnr','?'):.2f} dB, SR={ckpt_data.get('sec_ratio','?'):.4f})")
+    else:
+        model.load_state_dict(ckpt_data)
+        print(f"已加载: {ckpt_path} (旧格式)")
     model.eval()
-    print("已加载: oam_crypt_dnn_epoch_10.pth")
+
+    # 从模型 buffer 取训练时的 RPP (rpp_conj 的共轭 = 原始 rpp)
+    rpp_system = torch.conj(model.rpp_conj)
+    print(f"已从 checkpoint 恢复训练时的 RPP 系统密钥")
 
     batch_imgs = next(iter(test_loader)).to(device)
     img_size = batch_imgs.shape[-1]
@@ -83,7 +94,7 @@ def main():
     cipher_auth = encrypt_batch(
         batch_imgs, CONFIG["l_auth"], rpp_system,
         CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-        size=size, z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"]
+        size=size, z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
     )
 
     with torch.no_grad():
@@ -111,7 +122,7 @@ def main():
             oam_conj = torch.conj(generate_oam_phase(size, l_test, device))
             U_demod = U_slm * oam_conj
             for k, z_k in enumerate(z_list):
-                U_at_z = propagate_asm(U_demod, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device)
+                U_at_z = propagate_asm(U_demod, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device, theta_max=theta_max_rad)
                 I = (U_at_z.real[cy:cy+img_size, cx:cx+img_size] ** 2 +
                      U_at_z.imag[cy:cy+img_size, cx:cx+img_size] ** 2)
                 I_norm = (I / (I.max() + 1e-8)).clamp(0, 1)
@@ -154,47 +165,112 @@ def main():
     print(f"  对比度 = {contrast:.2f}x  {'✓' if contrast > 2 else '✗ 物理正交性不足'}")
 
     # ============================================
-    # 测试 2: U-Net 增强后 - 错误 OAM 加密攻击
+    # 测试 2: U-Net 增强后 - 多样本 OAM 攻击 + RPP 攻击
     # ============================================
     print(f"\n{'='*70}")
-    print("测试 2: U-Net 增强后 (用错误 OAM 加密, 正确 OAM 解密)")
+    print("测试 2: U-Net 增强后 - 多样本统计 (50 样本)")
     print(f"{'='*70}")
 
-    # 用各种错误 OAM 加密, 然后用授权 OAM 解密
-    l_attack_list = [-13, -9, -7, -3, -1, 0, 1, 3, 7, 9, 13]  # 非授权 OAM
+    l_attack_list = [-13, -9, -7, -3, -1, 0, 1, 3, 7, 9, 13]  # 全部非授权 OAM
+    l_wrong_trained = [-13, -9, -7, -3, 3, 7, 9, 13]  # 训练过的 l_wrong (不含 -1,0,1)
+    l_untrained = [-1, 0, 1]  # 未训练过的小拓扑荷
+
     print(f"攻击 OAM: {l_attack_list}")
+    print(f"训练过的: {l_wrong_trained}")
+    print(f"未训练过的: {l_untrained}")
     print(f"对照: 授权 OAM {CONFIG['l_auth']}\n")
 
-    auth_psnr_list = []
-    unauth_psnr_list = []
+    # 多样本统计
+    auth_energies = []      # 授权解密能量 (abs mean)
+    auth_psnrs = []         # 授权 PSNR
+    oam_attack_energies = {l: [] for l in l_attack_list}  # 每个错误 OAM 的能量
+    rpp_attack_energies = []  # RPP 攻击能量
 
+    n_samples = 0
     with torch.no_grad():
-        # 授权加密 -> 授权解密 (对照)
-        pred_auth = model(cipher_auth)
-        psnr_auth = calculate_psnr(pred_auth, build_target_grid(batch_imgs, device, size=size)).item()
-        auth_psnr_list.append(psnr_auth)
-        print(f"授权加密 -> 授权解密 (对照): PSNR = {psnr_auth:.2f} dB")
+        for si, batch_i in enumerate(test_loader):
+            batch_i = batch_i.to(device)
+            target = build_target_grid(batch_i, device, size=size)
 
-        # 错误 OAM 加密 -> 授权 OAM 解密 (攻击)
-        for l_attack in l_attack_list:
-            cipher_attack = encrypt_batch(
-                batch_imgs, [l_attack] * 4, rpp_system,
+            # 授权加密 -> 授权解密 (对照)
+            cipher_a = encrypt_batch(
+                batch_i, CONFIG["l_auth"], rpp_system,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                size=size, z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"]
+                size=size, z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
             )
-            pred_attack = model(cipher_attack)
-            psnr_attack = calculate_psnr(pred_attack, build_target_grid(batch_imgs, device, size=size)).item()
-            # 平均能量 (越低越好)
-            mean_energy = pred_attack.abs().mean().item()
-            unauth_psnr_list.append((l_attack, psnr_attack, mean_energy))
-            print(f"  l_attack={l_attack:>3} 加密 -> 授权 OAM 解密: PSNR = {psnr_attack:.2f} dB, 平均能量 = {mean_energy:.4f}")
+            pred_a = model(cipher_a)
+            auth_energies.append(pred_a.abs().mean().item())
+            auth_psnrs.append(calculate_psnr(pred_a, target).item())
 
-    print(f"\nU-Net 增强安全性:")
-    print(f"  授权 PSNR = {psnr_auth:.2f} dB")
-    print(f"  非授权平均 PSNR = {np.mean([p for _, p, _ in unauth_psnr_list]):.2f} dB")
-    print(f"  非授权最大 PSNR = {max(p for _, p, _ in unauth_psnr_list):.2f} dB")
-    sec_ratio = np.mean([e for _, _, e in unauth_psnr_list]) / pred_auth.abs().mean().item()
-    print(f"  安全比 (能量) = {sec_ratio:.4f}  {'✓' if sec_ratio < 0.5 else '✗'}")
+            # 错误 OAM 加密 -> 授权解密 (攻击)
+            for l_attack in l_attack_list:
+                cipher_atk = encrypt_batch(
+                    batch_i, [l_attack] * 4, rpp_system,
+                    CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
+                    size=size, z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                )
+                pred_atk = model(cipher_atk)
+                oam_attack_energies[l_attack].append(pred_atk.abs().mean().item())
+
+            # RPP 攻击: 正确 OAM + 错误 RPP (与训练验证一致!)
+            rpp_wrong = generate_rpp(size, device)
+            cipher_rpp = encrypt_batch(
+                batch_i, CONFIG["l_auth"], rpp_wrong,
+                CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
+                size=size, z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+            )
+            pred_rpp = model(cipher_rpp)
+            rpp_attack_energies.append(pred_rpp.abs().mean().item())
+
+            n_samples += 1
+            if si % 10 == 0:
+                print(f"  已处理 {si}/{len(test_loader)} 样本...")
+
+    # 汇总统计
+    auth_energy_mean = np.mean(auth_energies)
+    auth_psnr_mean = np.mean(auth_psnrs)
+    print(f"\n--- 结果 ({n_samples} 样本统计) ---")
+    print(f"授权解密: 平均能量={auth_energy_mean:.6f}, 平均PSNR={auth_psnr_mean:.2f} dB")
+
+    print(f"\nOAM 攻击 (错误 OAM 加密 + 正确 RPP):")
+    oam_energy_means = {}
+    for l in l_attack_list:
+        oam_energy_means[l] = np.mean(oam_attack_energies[l])
+        tag = "(训练过)" if l in l_wrong_trained else "(未训练)"
+        print(f"  l={l:>3} {tag}: 平均能量={oam_energy_means[l]:.6f}, SR={oam_energy_means[l]/auth_energy_mean:.4f}")
+
+    print(f"\nRPP 攻击 (正确 OAM + 错误 RPP, 与训练验证一致):")
+    rpp_energy_mean = np.mean(rpp_attack_energies)
+    sr_rpp = rpp_energy_mean / auth_energy_mean
+    print(f"  平均能量={rpp_energy_mean:.6f}, SR={sr_rpp:.4f}")
+
+    # 安全比对比
+    sr_all_oam = np.mean([oam_energy_means[l] for l in l_attack_list]) / auth_energy_mean
+    sr_trained_oam = np.mean([oam_energy_means[l] for l in l_wrong_trained]) / auth_energy_mean
+    sr_untrained_oam = np.mean([oam_energy_means[l] for l in l_untrained]) / auth_energy_mean
+
+    print(f"\n--- 安全比对比 (与训练 SR 0.091 对比) ---")
+    print(f"  训练日志 SR (RPP攻击, 200样本, 无abs): 0.091 (epoch_18)")
+    print(f"  本次 RPP攻击 SR (50样本, 有abs):      {sr_rpp:.4f}")
+    print(f"  本次 OAM攻击 SR 全部11个 (有abs):     {sr_all_oam:.4f}")
+    print(f"  本次 OAM攻击 SR 训练过的8个 (有abs):  {sr_trained_oam:.4f}")
+    print(f"  本次 OAM攻击 SR 未训练的3个 (有abs):   {sr_untrained_oam:.4f}")
+
+    print(f"\n结论:")
+    if sr_rpp < 0.5:
+        print(f"  ✓ RPP 攻击安全 (SR={sr_rpp:.4f}) — 与训练一致")
+    else:
+        print(f"  ✗ RPP 攻击不安全 (SR={sr_rpp:.4f})")
+    if sr_trained_oam < 0.5:
+        print(f"  ✓ 训练过的 OAM 攻击安全 (SR={sr_trained_oam:.4f})")
+    else:
+        print(f"  ✗ 训练过的 OAM 攻击不安全 (SR={sr_trained_oam:.4f})")
+    if sr_untrained_oam > sr_trained_oam * 1.5:
+        print(f"  ⚠ 未训练的 OAM (l=±1,0) 泛化不足: SR={sr_untrained_oam:.4f} >> 训练过的 {sr_trained_oam:.4f}")
+
+    # 用变量保存给后续可视化使用
+    psnr_auth = auth_psnr_mean
+    sec_ratio = sr_all_oam
 
     # ============================================
     # 可视化
@@ -248,7 +324,7 @@ def main():
             oam_conj = torch.conj(generate_oam_phase(size, l_test, device))
             U_demod = U_slm * oam_conj
             for col, z_k in enumerate(z_list):
-                U_at_z = propagate_asm(U_demod, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device)
+                U_at_z = propagate_asm(U_demod, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device, theta_max=theta_max_rad)
                 I = (U_at_z.real[cy:cy+img_size, cx:cx+img_size] ** 2 +
                      U_at_z.imag[cy:cy+img_size, cx:cx+img_size] ** 2).cpu().numpy()
                 axes2[row, col].imshow(I, cmap='hot')

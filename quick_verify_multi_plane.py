@@ -60,12 +60,13 @@ def main():
 
     # 2. RPP + 模型
     rpp_system = generate_rpp(size, device)
+    theta_max_rad = np.deg2rad(CONFIG["theta_max_deg"]) if CONFIG.get("theta_max_deg") else None
     model = OAM_Crypt_D2NN(
         size=size, num_layers=CONFIG["num_layers"],
         wavelength=CONFIG["wavelength"], pixel_size=CONFIG["pixel_size"],
         z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_system,
         oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"],
-        obj_encoding=CONFIG["obj_encoding"]
+        obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
     ).to(device)
     optimizer = optim.Adam(model.refine.parameters(), lr=CONFIG["lr"])
     criterion = nn.MSELoss()
@@ -84,7 +85,7 @@ def main():
                 batch_imgs, CONFIG["l_auth"], rpp_system,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                 size=size, z_list=CONFIG["z_list"],
-                obj_encoding=CONFIG["obj_encoding"]
+                obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
             )
             optimizer.zero_grad()
             pred = model(cipher)
@@ -100,7 +101,7 @@ def main():
                 tgt = build_target_grid(tb, device, size=size)
                 cp = encrypt_batch(tb, CONFIG["l_auth"], rpp_system,
                     CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                    size=size, z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"])
+                    size=size, z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad)
                 pp = model(cp)
                 psnr = calculate_psnr(pp, tgt).item()
             model.train()
@@ -121,14 +122,14 @@ def main():
             batch_imgs, CONFIG["l_auth"], rpp_system,
             CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
             size=size, z_list=CONFIG["z_list"],
-            obj_encoding=CONFIG["obj_encoding"]
+            obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
         )
         # 错误密文 (用错误 OAM 加密)
         cipher_wrong = encrypt_batch(
             batch_imgs, CONFIG["l_wrong"], rpp_system,
             CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
             size=size, z_list=CONFIG["z_list"],
-            obj_encoding=CONFIG["obj_encoding"]
+            obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
         )
 
         # 模拟纯相位 SLM 加载: 先去除 RPP, 再双相位编码 + 低通滤波
@@ -162,8 +163,8 @@ def main():
             U_demod_wrong = U_wrong * oam_conj
             target_j = batch_imgs[0, j]  # 目标图像 j
             for k, z_k in enumerate(CONFIG["z_list"]):
-                U_at_z_c = propagate_asm(U_demod_correct, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device)
-                U_at_z_w = propagate_asm(U_demod_wrong, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device)
+                U_at_z_c = propagate_asm(U_demod_correct, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device, theta_max=theta_max_rad)
+                U_at_z_w = propagate_asm(U_demod_wrong, -z_k, CONFIG["wavelength"], CONFIG["pixel_size"], device, theta_max=theta_max_rad)
                 # 中心区域的强度 |U|² 与目标图像 P_j 的相关性
                 I_c = (U_at_z_c.real[cy:cy+img_size, cx:cx+img_size] ** 2 +
                        U_at_z_c.imag[cy:cy+img_size, cx:cx+img_size] ** 2)
@@ -235,7 +236,7 @@ def main():
             oam_conj = torch.conj(generate_oam_phase(size, l, device))
             U_demod = U_correct * oam_conj
             z_j = CONFIG["z_list"][j]
-            U_at_z = propagate_asm(U_demod, -z_j, CONFIG["wavelength"], CONFIG["pixel_size"], device)
+            U_at_z = propagate_asm(U_demod, -z_j, CONFIG["wavelength"], CONFIG["pixel_size"], device, theta_max=theta_max_rad)
             intensity = (U_at_z.real ** 2 + U_at_z.imag ** 2).cpu().numpy()
             axes[0, j + 1].imshow(intensity, cmap='hot')
             axes[0, j + 1].set_title(f'OAM l={l} 解调\n在 z={z_j:.2f}m 平面\n(看到 l={l} 图像)',
@@ -251,7 +252,7 @@ def main():
         oam_conj = torch.conj(generate_oam_phase(size, l, device))
         U_demod = U_wrong * oam_conj
         z_j = CONFIG["z_list"][j]
-        U_at_z = propagate_asm(U_demod, -z_j, CONFIG["wavelength"], CONFIG["pixel_size"], device)
+        U_at_z = propagate_asm(U_demod, -z_j, CONFIG["wavelength"], CONFIG["pixel_size"], device, theta_max=theta_max_rad)
         intensity = (U_at_z.real ** 2 + U_at_z.imag ** 2).cpu().numpy()
         axes[1, j + 1].imshow(intensity, cmap='hot')
         axes[1, j + 1].set_title(f'OAM l={l} 解调\n在 z={z_j:.2f}m 平面\n(看不到图像)',

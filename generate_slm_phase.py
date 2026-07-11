@@ -36,7 +36,7 @@ def main():
     torch.manual_seed(42)
     np.random.seed(42)
 
-    ckpt = sys.argv[1] if len(sys.argv) > 1 else "oam_crypt_dnn_epoch_10.pth"
+    ckpt = sys.argv[1] if len(sys.argv) > 1 else "oam_crypt_dnn_epoch_18.pth"  # 最佳模型 (3层D2NN, PSNR 31.85 dB)
     os.makedirs(SLM_CONFIG["output_dir"], exist_ok=True)
 
     # 1. 数据 + RPP + 模型
@@ -46,18 +46,28 @@ def main():
     test_dataset = MNISTQuadDataset(mnist_test, img_size=CONFIG["size"] // 4)  # 匹配训练配置 (size//4, 增强 OAM 正交性)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-    rpp_system = generate_rpp(CONFIG["size"], device)
+    rpp_placeholder = generate_rpp(CONFIG["size"], device)
+    theta_max_rad = np.deg2rad(CONFIG["theta_max_deg"]) if CONFIG.get("theta_max_deg") else None
 
     model = OAM_Crypt_D2NN(
         size=CONFIG["size"], num_layers=CONFIG["num_layers"],
         wavelength=CONFIG["wavelength"], pixel_size=CONFIG["pixel_size"],
-        z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_system,
+        z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_placeholder,
         oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"],
-        obj_encoding=CONFIG["obj_encoding"]
+        obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
     ).to(device)
-    model.load_state_dict(torch.load(ckpt, map_location=device))
+    ckpt_data = torch.load(ckpt, map_location=device)
+    if isinstance(ckpt_data, dict) and 'model_state_dict' in ckpt_data:
+        model.load_state_dict(ckpt_data['model_state_dict'])
+        print(f"已加载: {ckpt} (PSNR={ckpt_data.get('psnr','?'):.2f} dB, SR={ckpt_data.get('sec_ratio','?'):.4f})", flush=True)
+    else:
+        model.load_state_dict(ckpt_data)
+        print(f"已加载: {ckpt} (旧格式)", flush=True)
     model.eval()
-    print(f"已加载: {ckpt}", flush=True)
+
+    # 从模型 buffer 取训练时的 RPP (rpp_conj 的共轭 = 原始 rpp)
+    rpp_system = torch.conj(model.rpp_conj)
+    print(f"已从 checkpoint 恢复训练时的 RPP 系统密钥", flush=True)
 
     # 2. 取一个样本加密
     batch_imgs = next(iter(test_loader)).to(device)
@@ -65,7 +75,7 @@ def main():
     U_cipher = encrypt_batch(
         batch_imgs, CONFIG["l_auth"], rpp_system,
         CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-        z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"]
+        z_list=CONFIG["z_list"], obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
     )
 
     # 3. 验证纯相位 SLM 加载的解密 PSNR
@@ -171,18 +181,133 @@ def main():
     plt.savefig(overview_path, dpi=120, bbox_inches='tight')
     print(f"  可视化概览: {overview_path}")
 
+    # ============================================================
+    # 7. D2NN 可训练衍射层相位导出 (反射式光路用, 每层对应 SLM 一个反射区域)
+    # ============================================================
+    num_layers = CONFIG["num_layers"]
+    if num_layers > 0:
+        print()
+        print("=" * 60)
+        print(f"D2NN 可训练衍射层相位导出 ({num_layers} 层)")
+        print("=" * 60)
+        print(f"每层对应反射式光路中光束在 SLM 上反射的一个区域")
+        print(f"层间距 z_layer = {CONFIG['z_layer']} m ({CONFIG['z_layer']*100:.0f} cm)")
+        print(f"总光程: {num_layers} 层 × {CONFIG['z_layer']*100:.0f} cm = {num_layers*CONFIG['z_layer']*100:.0f} cm")
+        print()
+
+        d2nn_phases = []  # 保存各层相位用于可视化
+        d2nn_grays = []
+        for i, layer in enumerate(model.layers):
+            with torch.no_grad():
+                # 相位 [-π, π]
+                phase_l = layer.phase.detach().cpu().numpy()
+                # 振幅透过率 (sigmoid 输出, 实际 SLM 纯相位时可忽略)
+                amp_l = torch.sigmoid(layer.amp_logit).detach().cpu().numpy()
+            gray_l = np.clip((phase_l + np.pi) / (2 * np.pi) * 255 + 0.5, 0, 255).astype(np.uint8)
+            d2nn_phases.append(phase_l)
+            d2nn_grays.append(gray_l)
+
+            # 保存单层相位图
+            path_layer = os.path.join(SLM_CONFIG["output_dir"], f"d2nn_layer{i+1}_phase_{size}x{size}.png")
+            Image.fromarray(gray_l).save(path_layer)
+
+            # 统计
+            print(f"Layer {i+1}/{num_layers}:")
+            print(f"  相位范围: [{phase_l.min():.4f}, {phase_l.max():.4f}] rad")
+            print(f"  相位 std: {phase_l.std():.4f} rad")
+            print(f"  振幅透过率: mean={amp_l.mean():.4f}, std={amp_l.std():.4f} (纯相位SLM可忽略)")
+            print(f"  灰度均值: {gray_l.mean():.2f}, std: {gray_l.std():.2f}")
+            print(f"  保存: {path_layer}")
+
+        # 合并所有 D2NN 层 + 密文相位到一张总览图 (反射式光路 SLM 布局示意)
+        # 反射式光路: 光束依次打到 SLM 区域1 -> 区域2 -> 区域3 (每层间自由传播 z_layer)
+        # 加上密文的双相位编码区域 (区域0, 加载到 SLM)
+        fig, axes = plt.subplots(2, num_layers + 1, figsize=(5 * (num_layers + 1), 10))
+        if num_layers + 1 == 1:
+            axes = axes.reshape(2, 1)
+
+        # 行1: 相位 (twilight 配色, [-π, π])
+        # 区域0: 密文双相位编码
+        im = axes[0, 0].imshow(phase, cmap='twilight', vmin=-np.pi, vmax=np.pi)
+        axes[0, 0].set_title(f"区域0: 密文双相位编码\n(反射式光路起点)\n{size}×{size}", fontsize=10)
+        plt.colorbar(im, ax=axes[0, 0], fraction=0.046)
+        # 区域1..N: D2NN 层
+        for i in range(num_layers):
+            im = axes[0, i + 1].imshow(d2nn_phases[i], cmap='twilight', vmin=-np.pi, vmax=np.pi)
+            axes[0, i + 1].set_title(f"区域{i+1}: D2NN Layer {i+1}\n(第{i+1}次反射)\nstd={d2nn_phases[i].std():.3f} rad", fontsize=10)
+            plt.colorbar(im, ax=axes[0, i + 1], fraction=0.046)
+
+        # 行2: 灰度图 (SLM 实际加载的 8-bit 图)
+        axes[1, 0].imshow(gray_size, cmap='gray', vmin=0, vmax=255)
+        axes[1, 0].set_title(f"区域0 灰度\n[0, 255] uint8", fontsize=10)
+        for i in range(num_layers):
+            axes[1, i + 1].imshow(d2nn_grays[i], cmap='gray', vmin=0, vmax=255)
+            axes[1, i + 1].set_title(f"区域{i+1} 灰度\nmean={d2nn_grays[i].mean():.1f}", fontsize=10)
+
+        for ax in axes.ravel():
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        plt.suptitle(f"反射式 D2NN 光路 SLM 相位布局 ({num_layers} 层, z_layer={CONFIG['z_layer']*100:.0f}cm, "
+                     f"总光程={num_layers*CONFIG['z_layer']*100:.0f}cm)\n"
+                     f"光束路径: 区域0 → [传播 {CONFIG['z_layer']*100:.0f}cm] → 区域1 → ... → 区域{num_layers}",
+                     fontsize=12)
+        plt.tight_layout(rect=[0, 0, 1, 0.93])
+        d2nn_overview = os.path.join(SLM_CONFIG["output_dir"], f"d2nn_layers_overview_{num_layers}L.png")
+        plt.savefig(d2nn_overview, dpi=120, bbox_inches='tight')
+        plt.close()
+        print()
+        print(f"D2NN 层相位总览图: {d2nn_overview}")
+
+        # 反射式光路 SLM 布局: 在 1920×1080 SLM 上水平排列 N+1 个区域
+        # 每个区域宽度 = 1920 / (N+1), 高度 = 1080
+        # 注意: 实际反射式光路中这些区域是同一 SLM 的不同空间位置, 光束斜入射依次反射
+        n_regions = num_layers + 1  # 区域0 (密文) + N 个 D2NN 层
+        region_w = SLM_CONFIG["width"] // n_regions
+        region_h = SLM_CONFIG["height"]
+        # 把 1080×1080 全息图缩放到 region_w × region_h
+        from PIL import Image as PILImage
+
+        slm_reflective = np.zeros((SLM_CONFIG["height"], SLM_CONFIG["width"]), dtype=np.uint8)
+        # 区域0: 密文双相位 (缩放)
+        img0 = PILImage.fromarray(gray_size).resize((region_w, region_h), PILImage.BILINEAR)
+        slm_reflective[:, 0:region_w] = np.array(img0)
+        # 区域1..N: D2NN 层相位 (缩放)
+        for i in range(num_layers):
+            img_i = PILImage.fromarray(d2nn_grays[i]).resize((region_w, region_h), PILImage.BILINEAR)
+            x_start = (i + 1) * region_w
+            slm_reflective[:, x_start:x_start + region_w] = np.array(img_i)
+
+        path_reflective = os.path.join(SLM_CONFIG["output_dir"],
+                                       f"slm_reflective_{num_layers}L_{SLM_CONFIG['width']}x{SLM_CONFIG['height']}.png")
+        Image.fromarray(slm_reflective).save(path_reflective)
+        print(f"反射式 SLM 布局图 ({n_regions} 区域水平排列): {path_reflective}")
+        print(f"  每区域尺寸: {region_w}×{region_h}")
+        print(f"  区域0 (密文双相位): x=[0, {region_w}]")
+        for i in range(num_layers):
+            x_start = (i + 1) * region_w
+            print(f"  区域{i+1} (D2NN Layer {i+1}): x=[{x_start}, {x_start + region_w}]")
+
     print()
     print("=" * 60)
-    print("SLM 加载说明 (双相位编码)")
+    print("SLM 加载说明 (双相位编码 + D2NN 反射式光路)")
     print("=" * 60)
-    print(f"1. 将 slm_phase_1920x1080.png 加载到 Holoeye PLUTO 控制软件")
-    print(f"2. SLM 工作波长设为 532 nm (绿光)")
-    print(f"3. SLM 出射光场 = 双相位编码 pattern (纯相位, |U|=1)")
-    print(f"   编码: 棋盘格交错 phi1=arg(U_sum)+arccos(A), phi2=arg(U_sum)-arccos(A)")
-    print(f"   其中 U_sum = U_cipher * conj(RPP) (已去除系统密钥)")
-    print(f"4. 光路: SLM -> 自由传播(低通滤波恢复复振幅) -> OAM 解复用 -> 多平面聚焦")
-    print(f"5. 多平面选择性: z_list={CONFIG['z_list']}")
-    print(f"6. 解密 PSNR = {psnr_dp:.2f} dB (> 30 dB 目标)")
+    print(f"1. 反射式光路: SLM + 平面镜, 光束斜入射")
+    print(f"2. SLM 分 {num_layers + 1 if num_layers > 0 else 1} 个区域:")
+    print(f"   - 区域0: 密文双相位编码 (输入)")
+    if num_layers > 0:
+        for i in range(num_layers):
+            print(f"   - 区域{i+1}: D2NN Layer {i+1} (第{i+1}次反射, 可训练相位)")
+    print(f"3. 光束路径: 区域0 → [传播 {CONFIG['z_layer']*100:.0f}cm] → 区域1 → ... → 区域{num_layers}")
+    print(f"4. 工作波长: 532 nm (绿光)")
+    print(f"5. 加载文件:")
+    print(f"   - 密文: slm_phase_{SLM_CONFIG['width']}x{SLM_CONFIG['height']}.png")
+    if num_layers > 0:
+        for i in range(num_layers):
+            print(f"   - D2NN Layer {i+1}: d2nn_layer{i+1}_phase_{size}x{size}.png")
+        print(f"   - 反射式布局总图: slm_reflective_{num_layers}L_{SLM_CONFIG['width']}x{SLM_CONFIG['height']}.png")
+    print(f"6. 多平面选择性: z_list={CONFIG['z_list']}")
+    print(f"7. 解密 PSNR = {psnr_dp:.2f} dB (> 30 dB 目标)")
 
 
 if __name__ == "__main__":

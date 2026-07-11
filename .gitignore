@@ -1,20 +1,30 @@
-# 数据集
-data/
+# 模型权重 (.pth, 通常较大, 不进 git, 用 GitHub Release 分发)
+*.pth
+*.pt
+
+# Python 缓存
 __pycache__/
 *.pyc
+*.pyo
 
-# PyTorch checkpoint (除最新 epoch_10 外其他都排除, 避免仓库变大)
-*.pth
-!oam_crypt_dnn_epoch_10.pth
-!rpp_system.pt
-
-# 系统/IDE 文件
+# IDE / 编辑器
 .vscode/
 .idea/
 *.swp
-.DS_Store
-Thumbs.db
+*.swo
+
+# 训练日志和中间输出
+train_*.txt
+*.log
+
+# 内部 IDE/工具目录
+.trae/
+.aider*
 
 # 临时文件
-*.log
 *.tmp
+*.bak
+*.backup
+
+# 数据集(MNIST 自动下载, 不需入库)
+data/
