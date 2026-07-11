@@ -30,11 +30,12 @@ model.eval()
 # ========== 2. 取测试样本 ==========
 transform = transforms.Compose([transforms.ToTensor()])
 full_test = torchvision.datasets.MNIST(root='./data', train=False, download=False, transform=transform)
-mnist_test = Subset(full_test, range(40))
-test_dataset = m.MNISTQuadDataset(mnist_test, img_size=m.CONFIG['size']//4, num_channels=4)
+# v3 10 通道: 50 张一组 (5 个样本)
+mnist_test = Subset(full_test, range(50))
+test_dataset = m.MNISTQuadDataset(mnist_test, img_size=m.CONFIG['size']//5, num_channels=10)
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 sample = next(iter(test_loader)).to(device)
-print(f"样本形状: {sample.shape} (4 个数字)")
+print(f"样本形状: {sample.shape} (10 个数字)")
 
 # ========== 3. 加密 (数字仿真流程) ==========
 with torch.no_grad():
@@ -88,23 +89,24 @@ with torch.no_grad():
     print(f"   8-bit 量化误差 (mean|U_diff|): {quant_error:.6f} (越小越好)")
 
     # ========== 5. 重建 (SLM 仿真) ==========
-    # 标准 SLM 加载: 棋盘格 phase only 场, 直接送入解密模型
-    # model 内部: 去 RPP + phase 提取 + OAM 解调 + ASM + D2NN + U-Net
-    # 注意: model 已在训练时模拟了 SLM 加载, 数字流程和 SLM 流程输出一致
+    # v3 10 通道: 与 4 通道一致, SLM 加载棋盘格 phase 直接送入 model
+    # 4 通道测试已验证: 棋盘格 phase 输入 model, 内部去 RPP + 8bit 量化, 与训练一致
+    # 10 通道棋盘格更复杂 (2x5 网格叠加 arccos), 但实测仍优于加 lowpass
     c_slm = U_slm.unsqueeze(0)  # (1, 1080, 1080)
     pred_slm = model(c_slm).clamp(0, 1)
     psnr_slm = m.calculate_center_psnr(pred_slm, tgt).item()
-    print(f"\nE. SLM 仿真 PSNR_C: {psnr_slm:.2f} dB")
+    print(f"\nE. SLM 仿真 (棋盘格 phase) PSNR_C: {psnr_slm:.2f} dB")
 
     # ========== 6. 对比可视化 ==========
     H, W = pred_digital.shape[-2:]
     cy, cx = H//2, W//2
     h270 = 135
 
-    # 3 行: target, digital, slm (每行 4 通道重建 + 4 列误差)
-    fig, axes = plt.subplots(3, 9, figsize=(22, 8))
+    # v3 10 通道: 3 行 (target/digital/slm) x 11 列 (0=cipher/SLM 灰度, 1-10=通道)
+    NUM_CH = 10
+    fig, axes = plt.subplots(3, 1 + NUM_CH, figsize=(28, 8))
     print("\n=== 各通道中心 PSNR_C ===")
-    for j in range(4):
+    for j in range(NUM_CH):
         # Target
         axes[0, 1+j].imshow(tgt[0, j].cpu().numpy(), cmap='gray', vmin=0, vmax=1)
         axes[0, 1+j].set_title(f"Target Ch{j+1}", fontsize=9)
@@ -113,10 +115,16 @@ with torch.no_grad():
         # SLM
         axes[2, 1+j].imshow(pred_slm[0, j].cpu().numpy(), cmap='gray', vmin=0, vmax=1)
 
-        # PSNR per channel
-        mse_d = torch.mean((pred_digital[0, j, cy-h270:cy+h270, cx-h270:cx+h270] - tgt[0, j, cy-h270:cy+h270, cx-h270:cx+h270])**2)
+        # PSNR per channel (用整个 2x5 网格对应位置)
+        # 通道 j 的位置: row=j//5, col=j%5
+        row_idx = j // 5
+        col_idx = j % 5
+        cell_h, cell_w = 216, 216
+        y = 324 + row_idx * cell_h
+        x = col_idx * cell_w
+        mse_d = torch.mean((pred_digital[0, j, y:y+cell_h, x:x+cell_w] - tgt[0, j, y:y+cell_h, x:x+cell_w])**2)
         psnr_d_ch = -10*np.log10(mse_d.item()+1e-12)
-        mse_s = torch.mean((pred_slm[0, j, cy-h270:cy+h270, cx-h270:cx+h270] - tgt[0, j, cy-h270:cy+h270, cx-h270:cx+h270])**2)
+        mse_s = torch.mean((pred_slm[0, j, y:y+cell_h, x:x+cell_w] - tgt[0, j, y:y+cell_h, x:x+cell_w])**2)
         psnr_s_ch = -10*np.log10(mse_s.item()+1e-12)
         print(f"  Ch{j+1} (l={m.CONFIG['l_auth'][j]}): Digital={psnr_d_ch:.1f}, SLM={psnr_s_ch:.1f} dB")
         axes[2, 1+j].set_title(f"PSNR_C={psnr_s_ch:.1f}dB", fontsize=9)
@@ -134,22 +142,8 @@ with torch.no_grad():
     for i, label in enumerate(row_labels):
         axes[i, 0].set_ylabel(label, fontsize=10, fontweight='bold')
 
-    # 第 5-8 列: 误差 (相对 target)
-    for j in range(4):
-        err_d = (pred_digital[0, j] - tgt[0, j]).cpu().numpy()
-        err_s = (pred_slm[0, j] - tgt[0, j]).cpu().numpy()
-        vmax = 0.3
-        axes[1, 5+j].imshow(np.abs(err_d), cmap='hot', vmin=0, vmax=vmax)
-        axes[2, 5+j].imshow(np.abs(err_s), cmap='hot', vmin=0, vmax=vmax)
-        if j == 0:
-            axes[1, 5+j].set_title("|Error| Digital", fontsize=9)
-            axes[2, 5+j].set_title("|Error| SLM", fontsize=9)
-    # 第 5 列: target 行留空 (避免 "Ch1" 错误标题)
-    axes[0, 5].set_title("")
-    # 注意: 由于现在是 3 行图 (target/digital/slm), 不再画 4 行误差
-
     for ax in axes.ravel(): ax.set_xticks([]); ax.set_yticks([])
-    plt.suptitle(f"SLM Loading Test (4-Channel, 8-bit Phase, Holoeye PLUTO format) | "
+    plt.suptitle(f"SLM Loading Test (10-Channel, 8-bit Phase, Holoeye PLUTO format) | "
                  f"Quant error: {quant_error:.4f}",
                  fontsize=13, fontweight='bold')
     plt.tight_layout()

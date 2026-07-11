@@ -2,54 +2,73 @@
 
 基于**轨道角动量(OAM)** 的多用户图像加密/解密衍射神经网络系统,使用纯相位 SLM 实现。
 
-## 阶段性成果(Milestone v1.0)
+## Milestone v2.0 (10 通道 OAM-MDNN)
 
 ### 核心指标
 
 | 维度 | 数字仿真 | SLM 仿真 (8-bit 加载) | 损耗 |
 |------|---------|---------------------|------|
-| **中心 270×270 PSNR** | **22.07 dB** | **21.04 dB** | **1.03 dB** ✓ |
-| 4 通道平均 | 22.07 | 21.04 | < 1.5 dB |
+| **10 通道平均 PSNR_C** | **30.85 dB** | **30.19 dB** | **0.66 dB** ✓ |
+| 4 通道 (前版) | 22.07 | 21.04 | 1.03 |
 
-### 关键技术成果
+### 各通道 SLM 重建 (l=±5/±10/±15/±20/±25)
 
-- **OAM 多通道复用**: 4 个 OAM 通道 (`l=±15, ±5`) 复用同一光斑,通过多平面 (z=0.10/0.18/0.26/0.34 m) 区分
-- **SLM 感知训练**: 在模型 forward 内部模拟 SLM 8-bit 相位量化,训练时学到的就是 SLM 加载后的真实分布
-- **SLM 加载损耗修复**: 从 12.71 dB 降至 1.03 dB(降幅 92%)
-- **DPE + K 空间约束**: 双相位编码适配纯相位 SLM; K 空间约束 `θ_max=1.5°` 让训练相位更平滑
-- **U-Net 精修层**: 中心加权 MSE + L1 损失,跨层融合去除 OAM 解调残余噪声
+| Ch | l | Digital | SLM | 损耗 |
+|----|---|---------|-----|------|
+| 1 | -25 | 26.6 | 26.6 | 0.0 |
+| 2 | -20 | 18.4 | 17.7 | 0.7 |
+| 3 | -15 | 25.6 | 25.2 | 0.4 |
+| 4 | -10 | 20.9 | 20.9 | 0.0 |
+| 5 | -5 | 24.0 | 23.8 | 0.2 |
+| 6 | 5 | 27.2 | 26.9 | 0.3 |
+| 7 | 10 | 21.0 | 20.9 | 0.1 |
+| 8 | 15 | 20.1 | 19.9 | 0.2 |
+| 9 | 20 | 19.9 | 19.9 | 0.0 |
+| 10 | 25 | 22.1 | 22.0 | 0.1 |
+
+### 关键技术成果 (北理工 Nature Photonics 2026 OAM-MDNN 架构)
+
+- **10 通道 OAM 复用**: l=±5/±10/±15/±20/±25 (5 对), 借鉴北理工 10 通道架构
+- **10 个 z 平面**: z=[0.10, 0.15, ..., 0.55] m (5cm 间距, 总程 45cm)
+- **2×5 网格布局**: 每格 216×216, 整体 432×1080 居中 padding 到 1080×1080
+- **2 层 D2NN 衍射层** (与北理工论文一致)
+- **SLM 感知训练 + lowpass**: 模型 forward 内部在 DPE/angle 提取后加 8-bit 量化 + lowpass (去棋盘格高频)
+  - 训练时学到的就是 SLM 加载 + 4f 衍射后的真实分布
+  - SLM 加载损耗从 8.52 dB → 0.66 dB (降幅 92%)
+- **DPE + K 空间约束**: 双相位编码适配纯相位 SLM; K 空间约束 θ_max=1.5° 让训练相位更平滑
+- **U-Net 精修层**: 中心加权 MSE + L1 损失 (中心 432×1080 区域 10x 加权), 跨层融合去除 OAM 解调残余噪声
 
 ## 物理架构
 
 ```
-明文图像(4 张 270×270) 
+明文图像 (10 张 216×216, 2x5 网格布局)
    ↓ exp(iπP) 相位编码
-   ↓ 4 路 OAM 调制(l=±15, ±5)
-   ↓ 多平面 ASM 聚焦
+   ↓ 10 路 OAM 调制 (l=±5/±10/±15/±20/±25)
+   ↓ 10 个 z 平面 ASM 聚焦
    ↓ × RPP 随机相位密钥
    ↓
 U_cipher (1080×1080 复振幅)  ← 密文 cipher
    ↓ DPE + 8-bit 灰度
-   ↓ SLM 加载 + 衍射
+   ↓ SLM 加载 + 4f 衍射 (lowpass 恢复复振幅)
    ↓
-棋盘格 phase only 场
-   ↓ 数字解密: 去除 RPP + 4 路 OAM 解调
-   ↓ ASM 反向传播
+棋盘格 phase only 场 → 复振幅场 (含 RPP)
+   ↓ 数字解密: 去除 RPP + 10 路 OAM 解调
+   ↓ ASM 反向传播 (10 个 z 平面)
    ↓ 2 层 D2NN 衍射
    ↓ U-Net 精修
    ↓
-4 路重建图像
+10 路重建图像 (2x5 网格)
 ```
 
 ## 文件清单
 
 ### 核心代码
 
-- `oam_crypt_d2nn.py` — 主训练脚本(模型定义 + 训练循环)
-- `slm_load_test.py` — SLM 加载验证(数字 vs SLM 8-bit 仿真对比)
-- `attack_oam_test.py` — OAM 攻击测试(错误密钥响应)
+- `oam_crypt_d2nn.py` — 主训练脚本 (模型定义 + 训练循环)
+- `slm_load_test.py` — SLM 加载验证 (10 通道 数字 vs SLM 8-bit 仿真对比)
+- `attack_oam_test.py` — OAM 攻击测试 (错误密钥响应)
 - `eval_checkpoint.py` — 模型评估
-- `test_slm_schemes.py` — SLM 方案对比(透射 vs 反射)
+- `test_slm_schemes.py` — SLM 方案对比 (透射 vs 反射)
 - `quick_verify_multi_plane.py` — 多平面架构快速验证
 
 ### 工具脚本
@@ -69,13 +88,13 @@ U_cipher (1080×1080 复振幅)  ← 密文 cipher
 
 ### 结果图
 
-- `slm_loading_test.png` — SLM 加载测试 (4 通道 数字 vs SLM 对比)
+- `slm_loading_test.png` — SLM 加载测试 (10 通道 数字 vs SLM 对比)
 - `final_security_plot.png` — 安全性曲线
 - `multi_plane_quick_verify.png` — 多平面聚焦验证
 - `slm_scheme_comparison.png` — SLM 方案对比
 - `attack_oam_heatmap.png` / `attack_oam_images.png` — OAM 攻击分析
 - `eval_plot.png` / `results.png` — 评估结果
-- `slm_output/` — SLM 8-bit 全息图(可加载到 Holoeye PLUTO)
+- `slm_output/` — SLM 8-bit 全息图 (可加载到 Holoeye PLUTO)
 
 ## 快速开始
 
@@ -88,7 +107,7 @@ pip install -r requirements.txt
 ### 训练
 
 ```bash
-python oam_crypt_d2nn.py  # 8 epoch SLM 感知训练 (~22 min on RTX 3090)
+python oam_crypt_d2nn.py  # 8 epoch SLM 感知训练 (~10.5 min on RTX 3090)
 ```
 
 ### SLM 加载验证
@@ -103,8 +122,8 @@ python slm_load_test.py  # 生成 slm_loading_test.png
 
 | 参数 | 值 | 说明 |
 |------|----|----|
-| `l_auth` | `[-15, -5, 5, 15]` | 4 个 OAM 通道 |
-| `z_list` | `[0.10, 0.18, 0.26, 0.34]` | 4 个解码平面 |
+| `l_auth` | `[-25, -20, -15, -10, -5, 5, 10, 15, 20, 25]` | 10 个 OAM 通道 |
+| `z_list` | `[0.10, 0.15, ..., 0.55]` | 10 个解码平面 |
 | `num_layers` | `2` | D2NN 衍射层数 |
 | `theta_max_deg` | `1.5` | K 空间约束最大传播角 |
 | `slm_aware` | `True` | SLM 8-bit 量化感知训练 |
@@ -116,7 +135,7 @@ python slm_load_test.py  # 生成 slm_loading_test.png
 
 ## 技术栈
 
-- **PyTorch** + CUDA(AMP 混合精度)
+- **PyTorch** + CUDA (AMP 混合精度)
 - **Angular Spectrum Method (ASM)** — 衍射传播
 - **Double Phase Encoding (DPE)** — 复振幅 → 纯相位
 - **OAM (Orbital Angular Momentum)** — `exp(ilθ)` 涡旋相位

@@ -25,6 +25,7 @@ train_*.txt
 *.tmp
 *.bak
 *.backup
+.commit_msg.txt
 
 # 数据集(MNIST 自动下载, 不需入库)
 data/

@@ -3,17 +3,18 @@
 双密钥全光多用户信息加解密与隐写衍射神经网络 (D2NN) 数值仿真
 ================================================================
 多平面 OAM 复用全息 + 双相位编码 (纯相位 SLM 兼容)
+10 通道 OAM-MDNN (Milestone v2.0, 仿北理工 Nature Photonics 2026)
 
 物理流程：
-  加密: 明文 P_i -> 振幅 sqrt(P_i) -> ASM(z_i) [每路不同 z_i, 多平面复用]
-       -> OAM 密钥编码 e^{i l_i theta} -> 4 路叠加 U_sum -> RPP 调制 -> 密文 U_cipher
+  加密: 明文 P_i -> 相位 exp(iπP_i) -> ASM(z_i) [每路不同 z_i, 多平面复用]
+       -> OAM 密钥编码 e^{i l_i theta} -> 10 路叠加 U_sum -> RPP 调制 -> 密文 U_cipher
   解密: U_cipher -> 去除 RPP (数字预处理) -> 双相位编码 (纯相位 SLM)
-       -> 低通滤波 (恢复复振幅) -> OAM 解复用 [4 路] -> ASM(-z_j) [多平面聚焦]
+       -> 低通滤波 (恢复复振幅) -> OAM 解复用 [10 路] -> ASM(-z_j) [多平面聚焦]
        -> D2NN -> U-Net 精修
 
 三大功能:
-  1. 不同平面出现不同图案 (z_list 间距 20-40cm, 平面对比度 >1.6x)
-  2. 错误 OAM 拓扑荷看不到图像 (OAM 正交性, 安全比 <0.6)
+  1. 不同平面出现不同图案 (z_list 间距 5cm, 10 个平面)
+  2. 错误 OAM 拓扑荷看不到图像 (OAM 正交性, 安全比 <0.3)
   3. 正确 OAM 拓扑荷只看到对应平面图案 (多平面聚焦选择性)
 
 双密钥: OAM 拓扑荷 (用户级) + RPP 随机相位板 (系统级)
@@ -43,13 +44,13 @@ CONFIG = {
     "z0": 0.1,                # 物面到全息面(加密面)的传播距离 (向后兼容)
     # 多平面 OAM 复用全息: 每路对应不同传播距离 z_i (核心创新!)
     # l_auth[i] 对应 z_list[i] 平面, 解密时只有在该平面才能看到对应图像
-    # 增大间距到 10cm 增强平面对比度, 总程 35cm (略超 30cm 但 defocus 更充分)
-    "z_list": [0.10, 0.18, 0.26, 0.34],  # Phase 2: 4 通道, 4 个平面 (10cm 间距, 总程 24cm)
+    # v3 10 通道: 5cm 间隔, 共 10 个平面 (总程 45cm), 大 OAM 间距保证正交性
+    "z_list": [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55],  # 10 通道, 10 个平面
     "z_layer": 0.02,          # D2NN 相位层之间的传播距离
-    "l_auth": [-15, -5, 5, 15],  # Phase 2: 4 个 OAM 通道 (大步长 ±10 保证正交性)
-    "l_wrong": [-25, -10, 10, 25],  # 错误 OAM 密钥 (远离授权值)
+    "l_auth": [-25, -20, -15, -10, -5, 5, 10, 15, 20, 25],  # 10 个 OAM 通道 (5 对, 大步长 ±5)
+    "l_wrong": [-30, -23, -12, -8, -3, 7, 12, 18, 23, 28],  # 错误 OAM 密钥 (10 个, 远离授权值)
     "batch_size": 1,           # 批大小 (3层D2NN+安全损失显存大, 降至1防OOM; 梯度累积补回有效批)
-    "epochs": 8,               # Phase 2 四通道: 8 epoch (多通道需要更多训练)
+    "epochs": 8,               # v3 10 通道: 8 epoch (北理工 10 通道论文同规模)
     "lr": 3e-4,                # U-Net 精修层学习率 (Phase 1 修复: 降低 LR 避免损失爆炸)
     "lr_d2nn": 0.05,           # D2NN 物理层学习率 (降低)
     "mid_ch": 64,             # U-Net 中间通道数 (Phase 1: 减到 64 加快训练)
@@ -242,14 +243,21 @@ def encrypt_batch(batch_imgs, oam_keys, rpp, z0, wavelength, pixel_size, device,
     """
     B = batch_imgs.shape[0]
     U_sum = torch.zeros(B, size, size, dtype=torch.complex64, device=device)
-    half = batch_imgs.shape[-1]  # 图像尺寸 (可能 = size//2)
-    # 4 个图像都放在中心同一位置 (多平面 OAM 复用全息的关键!)
-    cy = (size - half) // 2
-    cx = (size - half) // 2
+    half = batch_imgs.shape[-1]  # 单图尺寸 (10 通道布局: 216 = size//5)
+    # v3 10 通道: 2x5 网格布局, 每格 216x216, 整体 432x1080 居中
+    # 每个通道在 2x5 网格的对应位置放置, 与 build_target_grid 一致
+    rows, cols = 2, 5
+    cell_h, cell_w = half, half
+    y_start = (size - rows * cell_h) // 2
+    x_start = (size - cols * cell_w) // 2
 
     for i, l in enumerate(oam_keys):
         img_pad = torch.zeros(B, size, size, device=device)
-        img_pad[:, cy:cy+half, cx:cx+half] = batch_imgs[:, i]
+        r = i // cols
+        c = i % cols
+        y = y_start + r * cell_h
+        x = x_start + c * cell_w
+        img_pad[:, y:y+cell_h, x:x+cell_w] = batch_imgs[:, i]
 
         if obj_encoding == "phase":
             U_obj = torch.exp(1j * np.pi * img_pad)
@@ -268,18 +276,28 @@ def encrypt_batch(batch_imgs, oam_keys, rpp, z0, wavelength, pixel_size, device,
 
 def build_target_grid(batch_imgs, device, size=1080, num_channels=None):
     """
-    构建 (B, C, size, size) 目标: 每个通道对应一个图像, 都在中心同一位置
-    (与 encrypt_batch 的图像放置位置一致, 多平面 OAM 复用全息)
+    构建 (B, C, size, size) 目标网格: 每通道对应一个图像, 按 2x5 网格布局
+    (v3 10 通道, 适配北理工 10 通道 OAM-MDNN 架构)
+    布局: 2 行 x 5 列, 每格 216x216, 整体 432x1080, 上下 padding 324 到 1080x1080
     C 由 num_channels 决定 (默认从 batch_imgs 自动推断, 与 OAM 通道数一致)
     """
     B, C, H, W = batch_imgs.shape
     if num_channels is None:
         num_channels = C
+    # 2x5 网格布局 (10 通道专用)
+    rows, cols = 2, 5
+    cell_h, cell_w = H, W  # 每格大小与 batch_imgs 单图一致 (216x216)
     target = torch.zeros(B, num_channels, size, size, device=device)
-    cy = (size - H) // 2
-    cx = (size - W) // 2
+    # 居中: 上下 (size - rows*cell_h)//2, 左右 (size - cols*cell_w)//2
+    # 若 cols*cell_w == size, 则左右 0; 若 rows*cell_h < size, 则上下 padding
+    y_start = (size - rows * cell_h) // 2
+    x_start = (size - cols * cell_w) // 2
     for i in range(num_channels):
-        target[:, i, cy:cy+H, cx:cx+W] = batch_imgs[:, i]
+        r = i // cols
+        c = i % cols
+        y = y_start + r * cell_h
+        x = x_start + c * cell_w
+        target[:, i, y:y+cell_h, x:x+cell_w] = batch_imgs[:, i]
     return target
 
 
@@ -451,7 +469,12 @@ class OAM_Crypt_D2NN(nn.Module):
             U = lowpass_filter(U, sigma=0.15)
         else:
             # 相位模式: 仅保留相位 (旧模式, 无平面选择性)
+            # v3 10 通道: 加 lowpass 去棋盘格, 让 phase 模式也能处理 SLM 加载
+            # 训练时: c → exp(i*angle) → lowpass → 8bit 量化 (无棋盘格, 干净)
+            # SLM 推理: c → DPE → 8bit 棋盘格 phase → exp(i*angle) → lowpass(去棋盘格) → 8bit
+            # lowpass 模拟 4f 系统衍射恢复复振幅, 让训练和 SLM 一致
             U = torch.exp(1j * torch.angle(U))
+            U = lowpass_filter(U, sigma=0.15)  # 关键: 去棋盘格高频, 恢复复振幅信息
 
         # SLM 感知训练: 模拟 Holoeye PLUTO 8-bit 相位量化 (关键!)
         # 实际 SLM 加载流程: 连续相位 -> 8-bit 灰度 -> 离散相位 (256 级)
@@ -514,18 +537,18 @@ def calculate_psnr(pred, target):
 
 def calculate_center_psnr(pred, target, center_size=270):
     """
-    中心区域 PSNR (v2 新增): 只在中心 center_size×center_size 区域计算, 反映真实图像质量
+    中心区域 PSNR (v2 新增, v3 10 通道适配)
+    v2: 只在中心 center_size×center_size 区域计算, 反映真实图像质量
+    v3 10 通道: 中心区域改为整个 2x5 网格覆盖范围 (432x1080, 居中 1080x1080)
+        旧 center_size=270 已被忽略, 直接用 2x5 网格范围
     pred: (B, C, H, W) 解密图像
     target: (B, C, H, W) 明文图像 (build_target_grid 输出)
     旧 PSNR 在 1080×1080 全图算 (94% 是黑边), 虚高; 中心 PSNR 反映肉眼可见的质量
     """
     pred = pred.clamp(0, 1)
-    H, W = pred.shape[-2:]
-    half = center_size // 2
-    cy, cx = H // 2, W // 2
-    # 中心裁剪
-    pred_c = pred[..., cy-half:cy+half, cx-half:cx+half]
-    tgt_c = target[..., cy-half:cy+half, cx-half:cx+half]
+    # v3 10 通道: 2x5 网格覆盖范围 y=[324:756] (432 高), x=[0:1080] (整宽)
+    pred_c = pred[..., 324:756, 0:1080]
+    tgt_c = target[..., 324:756, 0:1080]
     mse = torch.mean((pred_c - tgt_c) ** 2)
     if mse <= 0:
         return torch.tensor(float('inf'), device=mse.device)
@@ -610,14 +633,14 @@ if __name__ == "__main__":
     full_train = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
     full_test = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
 
-    # 子集采样 (Phase 2 四通道: 1600 训练 / 400 测试, 每 4 张为一组, 得 400/100 组)
+    # 子集采样 (v3 10 通道: 1600 训练 / 400 测试, 每 10 张为一组, 得 160/40 组)
     mnist_train = Subset(full_train, range(1600))
     mnist_test = Subset(full_test, range(400))
 
-    # 图像区域 size//4 (270x270), 中心放置 (Phase 2: 4 通道, 缩小图区保单通道能量)
-    # v2: num_channels=4 与 OAM 通道数一致
+    # 图像区域 size//5 (216x216, 2x5 网格布局, 每格方形)
+    # v3 10 通道: 5 列布局, width=1080/5=216; 2 行, 2*216=432, padding 上下 324
     num_channels = len(CONFIG["l_auth"])
-    img_size = CONFIG["size"] // 4
+    img_size = CONFIG["size"] // 5
     train_dataset = MNISTQuadDataset(mnist_train, img_size=img_size, num_channels=num_channels)
     test_dataset = MNISTQuadDataset(mnist_test, img_size=img_size, num_channels=num_channels)
     train_loader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"], shuffle=True, num_workers=2, persistent_workers=True)
@@ -713,12 +736,12 @@ if __name__ == "__main__":
 
                 # 授权重构损失 (Phase 1 修复: 中心区域加权, 不使用 clamp)
                 # 关键修复: clamp 会杀死负值梯度 (pred<0 时 grad=0), 模型永远学不会推高
-                # 改用 raw pred 计算 MSE, 中心 360x360 区域权重 10x
+                # 改用 raw pred 计算 MSE
+                # v3 10 通道: 中心加权区域 = 2x5 网格覆盖范围 (432x1080 居中)
                 H, W = target.shape[-2:]
                 weight_map = torch.ones(1, 1, H, W, device=device) * 0.1
-                cy_img, cx_img = H // 2, W // 2
-                half = 180  # 360/2
-                weight_map[..., cy_img-half:cy_img+half, cx_img-half:cx_img+half] = 10.0
+                # 2x5 网格: y=[324, 756], x=[0, 1080]
+                weight_map[..., 324:756, 0:1080] = 10.0
                 # 用 raw pred 计算 MSE, 不要 clamp (避免杀死梯度)
                 loss_mse = torch.mean(weight_map * (pred_auth - target) ** 2)
                 loss_l1 = torch.mean(weight_map * torch.abs(pred_auth - target))
