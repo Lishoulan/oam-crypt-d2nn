@@ -7,6 +7,8 @@ import torchvision
 from torch.utils.data import DataLoader, Subset
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
+from font_config import setup_cjk
+setup_cjk()
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.manual_seed(42); np.random.seed(42)

@@ -238,6 +238,8 @@ def main():
     # 8. 保存可视化的对比图
     try:
         import matplotlib.pyplot as plt
+        from font_config import setup_cjk
+        setup_cjk()
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
         # 复振幅振幅

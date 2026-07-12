@@ -12,6 +12,8 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+from font_config import setup_cjk
+setup_cjk()
 from matplotlib.patches import FancyArrowPatch, Rectangle, Circle, FancyBboxPatch
 from matplotlib.patches import ConnectionPatch
 import matplotlib.patches as mpatches

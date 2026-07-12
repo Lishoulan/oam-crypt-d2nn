@@ -21,6 +21,8 @@ Off-axis 数字全息 + 相位恢复
 
 import numpy as np
 import matplotlib.pyplot as plt
+from font_config import setup_cjk
+setup_cjk()
 from matplotlib.patches import Circle
 # scipy.ndimage.shift 可选, 代码未直接使用 (用 np.roll 实现整数平移)
 

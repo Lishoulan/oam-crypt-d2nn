@@ -25,6 +25,8 @@ import time
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from font_config import setup_cjk
+setup_cjk()
 from torch.utils.data import Subset
 
 # 导入主项目模块

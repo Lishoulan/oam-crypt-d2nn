@@ -18,6 +18,8 @@ import torchvision
 import torchvision.transforms as transforms
 import numpy as np
 import matplotlib.pyplot as plt
+from font_config import setup_cjk
+setup_cjk()
 from torch.utils.data import DataLoader, Subset
 
 # 临时覆盖 CONFIG (用 128x128 快速验证)

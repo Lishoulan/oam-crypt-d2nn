@@ -25,6 +25,8 @@ import argparse
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from font_config import setup_cjk
+setup_cjk()
 from torch.utils.data import Subset, DataLoader
 import torchvision
 
