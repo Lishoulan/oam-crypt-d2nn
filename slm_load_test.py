@@ -15,11 +15,15 @@ torch.manual_seed(42); np.random.seed(42)
 
 # ========== 1. 加载最新可用 checkpoint ==========
 import glob
-# 优先加载 v5 best (纯 OAM 重叠最佳),否则取最新
+# 优先加载 v6 best (v6 架构升级最佳), 否则 v5, 否则最新
+v6_best = "v6_oam_overlap_v2_best_14.65dB.pth"
 v5_best = "v5_oam_overlap_best_14.17dB.pth"
-if os.path.exists(v5_best):
+if os.path.exists(v6_best):
+    ckpt_path = v6_best
+    print(f"[v6 best] 优先使用 {v6_best}")
+elif os.path.exists(v5_best):
     ckpt_path = v5_best
-    print(f"[v5 best] 优先使用 {v5_best}")
+    print(f"[v5 best] 退而使用 {v5_best}")
 else:
     ckpts = sorted(glob.glob("oam_crypt_dnn_epoch_*.pth"), key=lambda x: int(x.split('_')[-1].split('.')[0]))
     if not ckpts:

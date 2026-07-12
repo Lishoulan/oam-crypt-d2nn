@@ -52,21 +52,22 @@ CONFIG = {
     "l_wrong": [-30, -23, -12, -8, -3, 7, 12, 18, 23, 28],  # 错误 OAM 密钥 (10 个, 远离授权值)
     # v5 布局模式:
     #   "grid_2x5"    : 10 通道分 2x5 网格放 10 个独立 216x216 区域 (v3/v4 默认, PSNR 30+ dB)
-    #   "oam_overlap" : 10 通道全部叠在中心 216x216, 纯靠 OAM+z 分离 (v5 实验, 预计 25-28 dB)
-    # 切换 layout 时需同步调整: z_list (oam_overlap 用 10cm 间距更稀疏), epochs (50), mid_ch (96)
-    "layout": "oam_overlap",   # v5 active: "grid_2x5" (v4 baseline) / "oam_overlap" (v5 实验)
+    #   "oam_overlap" : 10 通道全部叠在中心 216x216, 纯靠 OAM+z 分离 (v5/v6 实验, 目标 20+ dB)
+    # 切换 layout 时需同步调整: z_list (oam_overlap 用 10cm 间距更稀疏), epochs (50), mid_ch (128), num_layers (3)
+    "layout": "oam_overlap",   # v6 active: "grid_2x5" (v4 baseline) / "oam_overlap" (v5/v6 实验)
     "batch_size": 1,           # 批大小 (3层D2NN+安全损失显存大, 降至1防OOM; 梯度累积补回有效批)
-    "epochs": 5,               # v4 优化: 8→5 epoch (v3 8 epoch 30.85 dB; Attention U-Net 5 epoch 应达 31+ dB)
+    "epochs": 50,              # v6: 5→50 (oam_overlap 模式需更长训练, v5 24 epoch 14.17 dB, v6 目标 20+ dB)
     "lr": 3e-4,                # U-Net 精修层学习率 (Phase 1 修复: 降低 LR 避免损失爆炸)
     "lr_d2nn": 0.05,           # D2NN 物理层学习率 (降低)
-    "mid_ch": 64,             # U-Net 中间通道数 (Phase 1: 减到 64 加快训练)
-    "num_layers": 2,          # 衍射层数 (借鉴文章 2 层无源衍射片设计)
+    "mid_ch": 48,              # v6 保守: mid_ch 64 在 3层D2NN+U-Net 1080x1080 OOM (8GB GPU 累积 13GB), 48 平衡容量+显存
+    "num_layers": 3,           # v6: 2→3 (加深 D2NN, 增强 OAM 解调)
     "freeze_epochs": 0,       # 0=不冻结
-    "warmup_epochs": 15,      # v4 fast: 全部 warmup, sec_weight=0 不启用 (5 epoch ~8 分钟)
-    "sec_weight": 0.0,        # v4 fast: 关闭安全损失 (SecurityRatio 后续单独测)
+    "warmup_epochs": 30,      # v6: 30 (oam_overlap 需要更长 warmup 学物理分离)
+    "sec_weight": 0.3,        # v6: 0.0→0.3 (OAM 串扰更强, 必须启用安全损失)
     "xtalk_weight": 0.0,      # 关闭串扰损失 (单通道无串扰)
     "l1_weight": 0.1,         # v4 优化: 启用 L1 损失 0.1 权重(配合 MSE 提升锐度)
-    "quick_test_n": 200,     # v5 oam_overlap: 200 样本 (20 batch/epoch, 50 epoch 总 ~1.7 小时)
+    "use_channel_attn": True, # v6 新增: 启用 ChannelAttention (跨通道建模 10 OAM 关系)
+    "quick_test_n": 200,     # v6 oam_overlap: 200 样本 (20 batch/epoch, 50 epoch 总 ~2-3 天)
 
     # 物光编码模式: "amplitude" = sqrt(P) 振幅编码 (有平面选择性, 配合双相位编码兼容纯相位SLM)
     #               "phase" = exp(iπP) 相位编码 (无平面选择性, 但天然纯相位)
@@ -365,6 +366,39 @@ class MNISTQuadDataset(Dataset):
 # 阶段5：解密网络架构
 # ==========================================
 
+class ChannelAttention(nn.Module):
+    """
+    v6 新增: 跨通道注意力 (Squeeze-and-Excitation 风格)
+    显式建模 10 通道 OAM 关系, 让网络自适应调整各通道权重。
+    关键: OAM 通道正交性让各通道理论独立, 但 OAM+z 重叠模式
+    10 通道在中心 216×216 同位置, 信道间存在串扰;
+    ChannelAttention 让网络自动学习"哪些通道当前需要加强/抑制"。
+
+    Args:
+        num_channels: 输入通道数 (v6: 3 * num_oam_channels = 30)
+        reduction: 压缩比 (默认 4)
+    """
+    def __init__(self, num_channels, reduction=4):
+        super().__init__()
+        mid = max(num_channels // reduction, 8)
+        self.fc1 = nn.Conv2d(num_channels, mid, 1, bias=False)
+        self.fc2 = nn.Conv2d(mid, num_channels, 1, bias=False)
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C, H, W) - 30 通道 (10 OAM × 3 features)
+        Returns:
+            x * channel_weight: (B, C, H, W)
+        """
+        w = self.gap(x)            # (B, C, 1, 1) 全局平均池化
+        w = F.relu(self.fc1(w), inplace=True)  # 压缩
+        w = self.sigmoid(self.fc2(w))           # 激励
+        return x * w
+
+
 class AttentionGate(nn.Module):
     """
     Attention Gate (Oktay et al. 2018, Attention U-Net).
@@ -418,9 +452,14 @@ class UNetRefine(nn.Module):
 
     使用 F.interpolate 代替 MaxPool/ConvTranspose, 支持任意尺寸输入 (含非 2 幂次, 如 1080)。
     相比基础 U-Net, attention 让网络自适应选择对当前通道重要的特征。
+
+    v6 新增: 可选 ChannelAttention (use_channel_attn=True) 显式建模跨 OAM 通道关系
     """
-    def __init__(self, in_ch=1, out_ch=1, mid_ch=64):
+    def __init__(self, in_ch=1, out_ch=1, mid_ch=64, use_channel_attn=True):
         super().__init__()
+
+        # v6 新增: 跨通道注意力 (30 通道 = 10 OAM × 3 features)
+        self.channel_attn = ChannelAttention(in_ch) if use_channel_attn else nn.Identity()
 
         # Encoder
         self.enc1 = self._conv_block(in_ch, mid_ch)
@@ -474,6 +513,9 @@ class UNetRefine(nn.Module):
         std = x.std(dim=(2, 3), keepdim=True) + 1e-8
         x_norm = (x - mean) / std
 
+        # v6 新增: 跨通道注意力 (在 U-Net encoder 之前)
+        x_norm = self.channel_attn(x_norm)
+
         e1 = self.enc1(x_norm)                              # (B, mid, H, W)
         e2 = self.enc2(self._down(e1))                      # (B, 2mid, H/2, W/2)
         e3 = self.enc3(self._down(e2))                     # (B, 4mid, H/4, W/4)
@@ -515,7 +557,8 @@ class OAM_Crypt_D2NN(nn.Module):
     """
     def __init__(self, size=1080, num_layers=4, wavelength=532e-9, pixel_size=8e-6,
                  z_layer=0.02, z0=0.1, rpp=None, oam_keys=None, z_list=None,
-                 obj_encoding="amplitude", theta_max=None, slm_aware=True):
+                 obj_encoding="amplitude", theta_max=None, slm_aware=True,
+                 use_channel_attn=True, mid_ch=None):
         super().__init__()
         self.layers = nn.ModuleList([DiffractiveLayer(size, nonlin_every=3, layer_idx=i) for i in range(num_layers)])
         self.wavelength = wavelength
@@ -544,7 +587,12 @@ class OAM_Crypt_D2NN(nn.Module):
         self.num_channels = len(oam_keys) if oam_keys is not None else len(CONFIG["l_auth"])
         # out_ch = num_channels: 每个通道输出一个图像, 都在同一位置 (多平面复用)
         # v2: 3 通道/图像 (|U|, real, imag), 总输入 = 3 * num_channels
-        self.refine = UNetRefine(in_ch=3 * self.num_channels, out_ch=self.num_channels, mid_ch=CONFIG["mid_ch"])
+        # v6: mid_ch 可外部覆盖, 默认从 CONFIG 取; use_channel_attn 启用跨通道建模
+        _mid_ch = mid_ch if mid_ch is not None else CONFIG["mid_ch"]
+        self.refine = UNetRefine(
+            in_ch=3 * self.num_channels, out_ch=self.num_channels,
+            mid_ch=_mid_ch, use_channel_attn=use_channel_attn
+        )
 
     def forward(self, U):
         device = U.device
@@ -783,12 +831,15 @@ if __name__ == "__main__":
     # 切换到 oam_overlap 时,自动启用适合的训练配置 (50 epoch / 更稀疏 z / 更大 mid_ch)
     if CONFIG["layout"] == "oam_overlap":
         CONFIG["epochs"] = max(CONFIG.get("epochs", 0), 50)         # 至少 50 epoch
-        CONFIG["warmup_epochs"] = max(CONFIG.get("warmup_epochs", 0), 10)  # 10 epoch warmup
+        CONFIG["warmup_epochs"] = max(CONFIG.get("warmup_epochs", 0), 30)  # v6: 30 epoch warmup
         CONFIG["sec_weight"] = 0.3                                  # OAM 串扰更强,开安全损失
-        CONFIG["mid_ch"] = 64                                       # 节省时间, mid_ch=64 仍能学到 OAM 分离
+        CONFIG["mid_ch"] = 48                                       # v6: 64 OOM, 48 平衡 (ChannelAttention 单独验证)
+        CONFIG["num_layers"] = 3                                    # v6: 2→3 (更深 D2NN)
+        CONFIG["use_channel_attn"] = True                           # v6: 启用跨通道注意力
         CONFIG["z_list"] = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]  # 10cm 间距
-        print(f"[v5 oam_overlap] 自动覆盖 CONFIG: epochs={CONFIG['epochs']}, warmup={CONFIG['warmup_epochs']}, "
-              f"sec_weight={CONFIG['sec_weight']}, mid_ch={CONFIG['mid_ch']}, z_list 10cm 间距, "
+        print(f"[v6 oam_overlap] 自动覆盖 CONFIG: epochs={CONFIG['epochs']}, warmup={CONFIG['warmup_epochs']}, "
+              f"sec_weight={CONFIG['sec_weight']}, mid_ch={CONFIG['mid_ch']}, num_layers={CONFIG['num_layers']}, "
+              f"channel_attn={CONFIG['use_channel_attn']}, z_list 10cm 间距, "
               f"quick_test_n={CONFIG.get('quick_test_n', 'all')}", flush=True)
 
     # ---------- 1. 数据准备 ----------
@@ -825,7 +876,9 @@ if __name__ == "__main__":
         z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_system,
         oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"],
         obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
-        slm_aware=CONFIG["slm_aware"]
+        slm_aware=CONFIG["slm_aware"],
+        use_channel_attn=CONFIG.get("use_channel_attn", True),
+        mid_ch=CONFIG["mid_ch"]
     ).to(device)
 
     # D2NN 层初始化为恒等 (phase=0, amp≈1)

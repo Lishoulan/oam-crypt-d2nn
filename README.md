@@ -78,18 +78,45 @@ CONFIG 新增 `layout` 字段支持两种空间布局,可通过 `oam_crypt_d2nn.
 | 物理意义 | 简化分离任务 | 极限 OAM 复用, 接近北理工论文架构 |
 
 **关键发现**:
-- **SLM 感知训练完美复用**: v4/v5 都达到 0.00-0.60 dB SLM 加载损耗, 8-bit 量化训练机制鲁棒
-- **纯 OAM 重叠对当前架构太难**: 10 通道同位置 + 中心加权 + 24 epoch 训练, PSNR_C 仅 11 dB
-- **未来方向 (v6)**: mid_ch 64→128 + num_layers 2→3 + cross-channel attention, 目标 20 dB
+- **SLM 感知训练完美复用**: v4/v5/v6 都达到 0.00-0.60 dB SLM 加载损耗, 8-bit 量化训练机制鲁棒
+- **纯 OAM 重叠对当前架构太难**: 10 通道同位置 + 中心加权 + 24-30 epoch 训练, PSNR_C 仅 11-15 dB
+- **v6 架构升级边际收益递减**: ChannelAttention + num_layers 3 只 +0.48 dB 提升 (14.17→14.65 dB)
+- **8GB GPU 显存是容量瓶颈**: mid_ch 64→48 反向调整, 大模型(96/128)直接 OOM
+- **未来方向 (v7)**: 升级 GPU (RTX 4090 24GB) + 预训练迁移策略, 目标 20 dB
 
 切换示例:
 ```python
 CONFIG["layout"] = "grid_2x5"   # v4 baseline
 # 或
-CONFIG["layout"] = "oam_overlap"  # v5 实验
+CONFIG["layout"] = "oam_overlap"  # v5/v6 实验
 ```
 
-详细分析见 [v5_pure_oam_overlap_report.md](v5_pure_oam_overlap_report.md)。
+详细分析见 [v5_pure_oam_overlap_report.md](v5_pure_oam_overlap_report.md) 和 [v6_oam_overlap_v2_report.md](v6_oam_overlap_v2_report.md)。
+
+## v6 架构升级 (ChannelAttention + num_layers 3)
+
+在 v5 基础上**新增**两个架构升级:
+
+| 升级项 | v5 | v6 | 效果 |
+|--------|-----|-----|------|
+| mid_ch (U-Net 中间通道) | 64 | 48 (受 8GB GPU 限制反向调整) | -25% (反向) |
+| num_layers (D2NN 衍射层) | 2 | 3 | +50% |
+| **ChannelAttention 跨通道建模** | 无 | **新增 (SE 风格, 30 通道)** | 新维度 |
+
+**ChannelAttention 创新**: Squeeze-Excitation 风格, 全局平均池化 → FC → sigmoid → 通道加权。  
+**设计动机**: 10 个 OAM 通道在中心 216×216 同位置叠加, 通道间串扰强, 让网络自适应学习"哪些 OAM 通道需要加强/抑制"。
+
+**v6 结果**:
+- 训练 PSNR_C: 14.65 dB (v5: 14.17 dB, **+0.48 dB 提升**)
+- 测试 PSNR_C: 11.11 dB
+- SLM 加载损耗: 0.00 dB (完美)
+- 训练时长: 30 epoch, 28 分钟 (vs v5 2 小时, 提速 4x)
+- 通道低端 PSNR 改善 4.4 dB (Ch4 8.6→13.0 dB)
+
+**v6 局限**:
+- +0.48 dB 远未达 20 dB 目标
+- 8GB GPU 显存不允许 mid_ch 64+ 同时叠加 num_layers 3 + ChannelAttention
+- sec_weight 启用后 PSNR 大降 2.5 dB (vs v5 0.6 dB, ChannelAttention 让安全损失更难满足)
 
 ## 文件清单
 
