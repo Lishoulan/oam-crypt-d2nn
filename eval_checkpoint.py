@@ -46,11 +46,13 @@ psnr_list = []
 with torch.no_grad():
     for i, test_batch in enumerate(test_loader):
         test_batch = test_batch.to(device)
-        tgt = build_target_grid(test_batch, device)
+        tgt = build_target_grid(test_batch, device,
+                                layout=CONFIG.get("layout", "grid_2x5"))
         c_auth = encrypt_batch(
             test_batch, CONFIG["l_auth"], rpp_system,
             CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-            z_list=CONFIG["z_list"]
+            z_list=CONFIG["z_list"],
+            layout=CONFIG.get("layout", "grid_2x5")
         )
         p_auth = model(c_auth)
         psnr = calculate_psnr(p_auth, tgt).item()
@@ -62,7 +64,8 @@ with torch.no_grad():
             c_unauth = encrypt_batch(
                 test_batch, CONFIG["l_auth"], rpp_wrong,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                z_list=CONFIG["z_list"]
+                z_list=CONFIG["z_list"],
+                layout=CONFIG.get("layout", "grid_2x5")
             )
             p_unauth = model(c_unauth)
             save_security_plot(

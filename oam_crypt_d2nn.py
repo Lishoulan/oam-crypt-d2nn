@@ -50,6 +50,11 @@ CONFIG = {
     "z_layer": 0.02,          # D2NN 相位层之间的传播距离
     "l_auth": [-25, -20, -15, -10, -5, 5, 10, 15, 20, 25],  # 10 个 OAM 通道 (5 对, 大步长 ±5)
     "l_wrong": [-30, -23, -12, -8, -3, 7, 12, 18, 23, 28],  # 错误 OAM 密钥 (10 个, 远离授权值)
+    # v5 布局模式:
+    #   "grid_2x5"    : 10 通道分 2x5 网格放 10 个独立 216x216 区域 (v3/v4 默认, PSNR 30+ dB)
+    #   "oam_overlap" : 10 通道全部叠在中心 216x216, 纯靠 OAM+z 分离 (v5 实验, 预计 25-28 dB)
+    # 切换 layout 时需同步调整: z_list (oam_overlap 用 10cm 间距更稀疏), epochs (50), mid_ch (96)
+    "layout": "oam_overlap",   # v5 active: "grid_2x5" (v4 baseline) / "oam_overlap" (v5 实验)
     "batch_size": 1,           # 批大小 (3层D2NN+安全损失显存大, 降至1防OOM; 梯度累积补回有效批)
     "epochs": 5,               # v4 优化: 8→5 epoch (v3 8 epoch 30.85 dB; Attention U-Net 5 epoch 应达 31+ dB)
     "lr": 3e-4,                # U-Net 精修层学习率 (Phase 1 修复: 降低 LR 避免损失爆炸)
@@ -61,7 +66,7 @@ CONFIG = {
     "sec_weight": 0.0,        # v4 fast: 关闭安全损失 (SecurityRatio 后续单独测)
     "xtalk_weight": 0.0,      # 关闭串扰损失 (单通道无串扰)
     "l1_weight": 0.1,         # v4 优化: 启用 L1 损失 0.1 权重(配合 MSE 提升锐度)
-    "quick_test_n": 1600,     # v4 训练: 用全量 1600 样本(默认)
+    "quick_test_n": 200,     # v5 oam_overlap: 200 样本 (20 batch/epoch, 50 epoch 总 ~1.7 小时)
 
     # 物光编码模式: "amplitude" = sqrt(P) 振幅编码 (有平面选择性, 配合双相位编码兼容纯相位SLM)
     #               "phase" = exp(iπP) 相位编码 (无平面选择性, 但天然纯相位)
@@ -230,11 +235,16 @@ class DiffractiveLayer(nn.Module):
 # ==========================================
 
 def encrypt_batch(batch_imgs, oam_keys, rpp, z0, wavelength, pixel_size, device,
-                  size=1080, z_list=None, obj_encoding="amplitude", theta_max=None):
+                  size=1080, z_list=None, obj_encoding="amplitude", theta_max=None,
+                  layout="grid_2x5"):
     """
     双密钥加密引擎(支持授权/未授权两种模式，由传入的 oam_keys / rpp 决定)
     - 输入: batch_imgs (B, C, S, S) 明文振幅图 (C = OAM 通道数, S 由调用方决定)
     - 输出: U_cipher (B, size, size) 复数密文场
+
+    v5 布局模式 (layout):
+      - "grid_2x5"    : 2x5 网格, 每通道 216x216 放独立位置 (v3/v4 默认行为)
+      - "oam_overlap" : 全部 10 通道叠加在中心 216x216, 纯靠 OAM+z 分离 (v5 实验)
 
     多平面 OAM 复用全息 (核心创新):
       - C 个图像都放在画面中心同一位置 (不分象限, 真正的复用全息)
@@ -247,20 +257,32 @@ def encrypt_batch(batch_imgs, oam_keys, rpp, z0, wavelength, pixel_size, device,
     B = batch_imgs.shape[0]
     U_sum = torch.zeros(B, size, size, dtype=torch.complex64, device=device)
     half = batch_imgs.shape[-1]  # 单图尺寸 (10 通道布局: 216 = size//5)
-    # v3 10 通道: 2x5 网格布局, 每格 216x216, 整体 432x1080 居中
-    # 每个通道在 2x5 网格的对应位置放置, 与 build_target_grid 一致
-    rows, cols = 2, 5
-    cell_h, cell_w = half, half
-    y_start = (size - rows * cell_h) // 2
-    x_start = (size - cols * cell_w) // 2
+
+    if layout == "grid_2x5":
+        # v3/v4 行为: 2x5 网格布局, 每格 216x216, 整体 432x1080 居中
+        rows, cols = 2, 5
+        cell_h, cell_w = half, half
+        y_start = (size - rows * cell_h) // 2
+        x_start = (size - cols * cell_w) // 2
+        positions = []
+        for i in range(len(oam_keys)):
+            r = i // cols
+            c = i % cols
+            y = y_start + r * cell_h
+            x = x_start + c * cell_w
+            positions.append((y, x))
+    elif layout == "oam_overlap":
+        # v5 新增: 全部 10 通道叠在中心 216x216 同一位置, 纯 OAM + z 分离
+        y_start = (size - half) // 2  # 432
+        x_start = (size - half) // 2  # 432
+        positions = [(y_start, x_start)] * len(oam_keys)
+    else:
+        raise ValueError(f"Unknown layout: {layout}, expect 'grid_2x5' or 'oam_overlap'")
 
     for i, l in enumerate(oam_keys):
         img_pad = torch.zeros(B, size, size, device=device)
-        r = i // cols
-        c = i % cols
-        y = y_start + r * cell_h
-        x = x_start + c * cell_w
-        img_pad[:, y:y+cell_h, x:x+cell_w] = batch_imgs[:, i]
+        y, x = positions[i]
+        img_pad[:, y:y+half, x:x+half] = batch_imgs[:, i]
 
         if obj_encoding == "phase":
             U_obj = torch.exp(1j * np.pi * img_pad)
@@ -277,30 +299,38 @@ def encrypt_batch(batch_imgs, oam_keys, rpp, z0, wavelength, pixel_size, device,
     return U_cipher
 
 
-def build_target_grid(batch_imgs, device, size=1080, num_channels=None):
+def build_target_grid(batch_imgs, device, size=1080, num_channels=None, layout="grid_2x5"):
     """
-    构建 (B, C, size, size) 目标网格: 每通道对应一个图像, 按 2x5 网格布局
-    (v3 10 通道, 适配北理工 10 通道 OAM-MDNN 架构)
-    布局: 2 行 x 5 列, 每格 216x216, 整体 432x1080, 上下 padding 324 到 1080x1080
+    构建 (B, C, size, size) 目标网格: 每通道对应一个图像
+    v5 布局模式 (layout):
+      - "grid_2x5"    : 2x5 网格, 每通道放独立 216x216 位置 (v3/v4 行为)
+      - "oam_overlap" : 全部通道都放中心 216x216 同一位置 (v5 实验)
     C 由 num_channels 决定 (默认从 batch_imgs 自动推断, 与 OAM 通道数一致)
     """
     B, C, H, W = batch_imgs.shape
     if num_channels is None:
         num_channels = C
-    # 2x5 网格布局 (10 通道专用)
-    rows, cols = 2, 5
-    cell_h, cell_w = H, W  # 每格大小与 batch_imgs 单图一致 (216x216)
     target = torch.zeros(B, num_channels, size, size, device=device)
-    # 居中: 上下 (size - rows*cell_h)//2, 左右 (size - cols*cell_w)//2
-    # 若 cols*cell_w == size, 则左右 0; 若 rows*cell_h < size, 则上下 padding
-    y_start = (size - rows * cell_h) // 2
-    x_start = (size - cols * cell_w) // 2
-    for i in range(num_channels):
-        r = i // cols
-        c = i % cols
-        y = y_start + r * cell_h
-        x = x_start + c * cell_w
-        target[:, i, y:y+cell_h, x:x+cell_w] = batch_imgs[:, i]
+
+    if layout == "grid_2x5":
+        # 2x5 网格布局 (10 通道 v3/v4 默认)
+        rows, cols = 2, 5
+        y_start = (size - rows * H) // 2
+        x_start = (size - cols * W) // 2
+        for i in range(num_channels):
+            r = i // cols
+            c = i % cols
+            y = y_start + r * H
+            x = x_start + c * W
+            target[:, i, y:y+H, x:x+W] = batch_imgs[:, i]
+    elif layout == "oam_overlap":
+        # v5 新增: 全部通道叠在中心 216x216
+        y_start = (size - H) // 2
+        x_start = (size - W) // 2
+        for i in range(num_channels):
+            target[:, i, y_start:y_start+H, x_start:x_start+W] = batch_imgs[:, i]
+    else:
+        raise ValueError(f"Unknown layout: {layout}, expect 'grid_2x5' or 'oam_overlap'")
     return target
 
 
@@ -605,15 +635,22 @@ def calculate_center_psnr(pred, target, center_size=270):
     中心区域 PSNR (v2 新增, v3 10 通道适配)
     v2: 只在中心 center_size×center_size 区域计算, 反映真实图像质量
     v3 10 通道: 中心区域改为整个 2x5 网格覆盖范围 (432x1080, 居中 1080x1080)
-        旧 center_size=270 已被忽略, 直接用 2x5 网格范围
+    v5 oam_overlap: 中心区域改为 216x216 居中方块 (y=[432:648], x=[432:648])
+        旧 center_size=270 已被忽略, 根据 CONFIG["layout"] 自适应
     pred: (B, C, H, W) 解密图像
     target: (B, C, H, W) 明文图像 (build_target_grid 输出)
     旧 PSNR 在 1080×1080 全图算 (94% 是黑边), 虚高; 中心 PSNR 反映肉眼可见的质量
     """
     pred = pred.clamp(0, 1)
-    # v3 10 通道: 2x5 网格覆盖范围 y=[324:756] (432 高), x=[0:1080] (整宽)
-    pred_c = pred[..., 324:756, 0:1080]
-    tgt_c = target[..., 324:756, 0:1080]
+    # 根据布局模式自适应中心区域
+    if CONFIG.get("layout", "grid_2x5") == "oam_overlap":
+        # v5: 全部通道在中心 216x216 (y=[432:648], x=[432:648])
+        pred_c = pred[..., 432:648, 432:648]
+        tgt_c = target[..., 432:648, 432:648]
+    else:
+        # v3/v4 默认: 2x5 网格覆盖范围 y=[324:756] (432 高), x=[0:1080] (整宽)
+        pred_c = pred[..., 324:756, 0:1080]
+        tgt_c = target[..., 324:756, 0:1080]
     mse = torch.mean((pred_c - tgt_c) ** 2)
     if mse <= 0:
         return torch.tensor(float('inf'), device=mse.device)
@@ -683,6 +720,56 @@ def save_security_plot(cipher_auth, pred_auth, target_auth,
     plt.close()
 
 
+def viz_decrypted_grid(pred, save_path="decrypted_grid_2x5.png"):
+    """
+    v5 新增: 把 10 通道解密输出 (B, 10, 1080, 1080) 拼成 2x5 网格图
+    每通道裁剪中心 216x216, 横向拼接成 2 行 (432x1080), 便于一眼看 10 个数字
+    不管 layout 是 grid_2x5 还是 oam_overlap, 都能直观展示 10 路结果
+    """
+    import matplotlib.pyplot as plt
+    from font_config import setup_cjk
+    setup_cjk()
+
+    C = pred.shape[1]
+    cy = pred.shape[-2] // 2
+    cx = pred.shape[-1] // 2
+    half = 108  # 216/2
+
+    cells = []
+    for i in range(C):
+        cell = pred[0, i, cy-half:cy+half, cx-half:cx+half].detach().cpu().numpy()
+        cells.append(np.clip(cell, 0, 1))
+
+    if C == 10:
+        # 2 行 x 5 列布局
+        row0 = np.concatenate(cells[:5], axis=1)  # 216 x 1080
+        row1 = np.concatenate(cells[5:], axis=1)  # 216 x 1080
+        grid = np.concatenate([row0, row1], axis=0)  # 432 x 1080
+    else:
+        # 自适应: 找接近正方形的网格
+        cols = int(np.ceil(np.sqrt(C)))
+        rows = int(np.ceil(C / cols))
+        rows_imgs = []
+        for r in range(rows):
+            row_cells = cells[r*cols:(r+1)*cols]
+            if len(row_cells) < cols:
+                # 不足补黑色
+                pad = [np.zeros_like(cells[0])] * (cols - len(row_cells))
+                row_cells = row_cells + pad
+            rows_imgs.append(np.concatenate(row_cells, axis=1))
+        grid = np.concatenate(rows_imgs, axis=0)
+
+    fig, ax = plt.subplots(figsize=(15, 3))
+    ax.imshow(grid, cmap='gray', vmin=0, vmax=1, aspect='equal')
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title(f"v5 解密结果 2x5 网格拼图 (10 通道, layout={CONFIG.get('layout', 'grid_2x5')})",
+                 fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  [VIZ] 已保存: {save_path} ({grid.shape[0]}x{grid.shape[1]})")
+
+
 # ==========================================
 # 阶段7：主训练与测试流程
 # ==========================================
@@ -691,6 +778,18 @@ if __name__ == "__main__":
     device = torch.device(CONFIG["device"])
     torch.manual_seed(42)
     np.random.seed(42)
+
+    # ---------- 0. v5 layout 自适应参数覆盖 ----------
+    # 切换到 oam_overlap 时,自动启用适合的训练配置 (50 epoch / 更稀疏 z / 更大 mid_ch)
+    if CONFIG["layout"] == "oam_overlap":
+        CONFIG["epochs"] = max(CONFIG.get("epochs", 0), 50)         # 至少 50 epoch
+        CONFIG["warmup_epochs"] = max(CONFIG.get("warmup_epochs", 0), 10)  # 10 epoch warmup
+        CONFIG["sec_weight"] = 0.3                                  # OAM 串扰更强,开安全损失
+        CONFIG["mid_ch"] = 64                                       # 节省时间, mid_ch=64 仍能学到 OAM 分离
+        CONFIG["z_list"] = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]  # 10cm 间距
+        print(f"[v5 oam_overlap] 自动覆盖 CONFIG: epochs={CONFIG['epochs']}, warmup={CONFIG['warmup_epochs']}, "
+              f"sec_weight={CONFIG['sec_weight']}, mid_ch={CONFIG['mid_ch']}, z_list 10cm 间距, "
+              f"quick_test_n={CONFIG.get('quick_test_n', 'all')}", flush=True)
 
     # ---------- 1. 数据准备 ----------
     transform = transforms.Compose([transforms.ToTensor()])
@@ -788,14 +887,16 @@ if __name__ == "__main__":
 
         for bidx, batch_imgs in enumerate(train_loader):
             batch_imgs = batch_imgs.to(device)
-            target = build_target_grid(batch_imgs, device, size=CONFIG["size"])
+            target = build_target_grid(batch_imgs, device, size=CONFIG["size"],
+                                       layout=CONFIG.get("layout", "grid_2x5"))
 
             # (a) 合法输入: 正确 OAM + 正确 RPP
             cipher_auth = encrypt_batch(
                 batch_imgs, CONFIG["l_auth"], rpp_system,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                 size=CONFIG["size"], z_list=CONFIG["z_list"],
-                obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
+                layout=CONFIG.get("layout", "grid_2x5")
             )
 
             optimizer.zero_grad()
@@ -806,10 +907,15 @@ if __name__ == "__main__":
                 # 关键修复: clamp 会杀死负值梯度 (pred<0 时 grad=0), 模型永远学不会推高
                 # 改用 raw pred 计算 MSE
                 # v3 10 通道: 中心加权区域 = 2x5 网格覆盖范围 (432x1080 居中)
+                # v5 oam_overlap: 中心加权区域 = 216x216 居中方块
                 H, W = target.shape[-2:]
                 weight_map = torch.ones(1, 1, H, W, device=device) * 0.1
-                # 2x5 网格: y=[324, 756], x=[0, 1080]
-                weight_map[..., 324:756, 0:1080] = 10.0
+                if CONFIG.get("layout", "grid_2x5") == "oam_overlap":
+                    # v5: 中心 216x216 (y=[432, 648], x=[432, 648])
+                    weight_map[..., 432:648, 432:648] = 10.0
+                else:
+                    # 2x5 网格: y=[324, 756], x=[0, 1080]
+                    weight_map[..., 324:756, 0:1080] = 10.0
                 # 用 raw pred 计算 MSE, 不要 clamp (避免杀死梯度)
                 loss_mse = torch.mean(weight_map * (pred_auth - target) ** 2)
                 loss_l1 = torch.mean(weight_map * torch.abs(pred_auth - target))
@@ -837,7 +943,8 @@ if __name__ == "__main__":
                             batch_imgs, l_wrong_sampled, rpp_system,
                             CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                             size=CONFIG["size"], z_list=CONFIG["z_list"],
-                            obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                            obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
+                            layout=CONFIG.get("layout", "grid_2x5")
                         )
                     else:
                         rpp_wrong = generate_rpp(CONFIG["size"], device)
@@ -845,7 +952,8 @@ if __name__ == "__main__":
                             batch_imgs, CONFIG["l_auth"], rpp_wrong,
                             CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                             size=CONFIG["size"], z_list=CONFIG["z_list"],
-                            obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                            obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
+                            layout=CONFIG.get("layout", "grid_2x5")
                         )
                     pred_unauth = model(cipher_unauth)
                     loss_sec = criterion_mse(pred_unauth, torch.zeros_like(pred_unauth))
@@ -886,14 +994,16 @@ if __name__ == "__main__":
             with torch.no_grad():
                 for test_batch in test_loader:
                     test_batch = test_batch.to(device)
-                    tgt = build_target_grid(test_batch, device, size=CONFIG["size"])
+                    tgt = build_target_grid(test_batch, device, size=CONFIG["size"],
+                                            layout=CONFIG.get("layout", "grid_2x5"))
 
                     # 合法解密
                     c_auth = encrypt_batch(
                         test_batch, CONFIG["l_auth"], rpp_system,
                         CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                         size=CONFIG["size"], z_list=CONFIG["z_list"],
-                        obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                        obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
+                        layout=CONFIG.get("layout", "grid_2x5")
                     )
                     p_auth = model(c_auth)
 
@@ -903,7 +1013,8 @@ if __name__ == "__main__":
                         test_batch, CONFIG["l_auth"], rpp_wrong_eval,
                         CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                         size=CONFIG["size"], z_list=CONFIG["z_list"],
-                        obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                        obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
+                        layout=CONFIG.get("layout", "grid_2x5")
                     )
                     p_rpp_unauth = model(c_rpp_unauth)
 
@@ -913,7 +1024,8 @@ if __name__ == "__main__":
                         test_batch, l_wrong_eval, rpp_system,
                         CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                         size=CONFIG["size"], z_list=CONFIG["z_list"],
-                        obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                        obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
+                        layout=CONFIG.get("layout", "grid_2x5")
                     )
                     p_oam_unauth = model(c_oam_unauth)
 

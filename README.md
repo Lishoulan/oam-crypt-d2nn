@@ -60,6 +60,37 @@ U_cipher (1080×1080 复振幅)  ← 密文 cipher
 10 路重建图像 (2x5 网格)
 ```
 
+## 两种布局对比 (v4 grid_2x5 vs v5 oam_overlap)
+
+CONFIG 新增 `layout` 字段支持两种空间布局,可通过 `oam_crypt_d2nn.py` 切换:
+
+| 维度 | grid_2x5 (v4 baseline) | oam_overlap (v5 实验) |
+|------|------------------------|------------------------|
+| 物理位置 | 10 个独立 216×216 区域 (2x5 网格) | 全部中心 216×216 同一位置 |
+| OAM 拓扑荷作用 | 仅辅助复用 | **唯一空间标签** |
+| z_list 间距 | 5cm (0.10-0.55m, 10 平面) | 10cm (0.05-0.95m, 10 平面) |
+| 总光程 | 45cm | 90cm |
+| **数字 PSNR_C** | **29.94 dB** | **11.02 dB** (24 epoch 训练) |
+| SLM 加载损耗 | 0.60 dB | 0.00 dB (完美) |
+| SecurityRatio_RPP | < 0.05 (通过) | 2.27 (失效, 因 PSNR 接近随机) |
+| 训练时长 | 5 epoch (~10 min) | 24 epoch (~2 小时) |
+| 工程实用 | ✓ 推荐生产方案 | ✗ 架构探索 |
+| 物理意义 | 简化分离任务 | 极限 OAM 复用, 接近北理工论文架构 |
+
+**关键发现**:
+- **SLM 感知训练完美复用**: v4/v5 都达到 0.00-0.60 dB SLM 加载损耗, 8-bit 量化训练机制鲁棒
+- **纯 OAM 重叠对当前架构太难**: 10 通道同位置 + 中心加权 + 24 epoch 训练, PSNR_C 仅 11 dB
+- **未来方向 (v6)**: mid_ch 64→128 + num_layers 2→3 + cross-channel attention, 目标 20 dB
+
+切换示例:
+```python
+CONFIG["layout"] = "grid_2x5"   # v4 baseline
+# 或
+CONFIG["layout"] = "oam_overlap"  # v5 实验
+```
+
+详细分析见 [v5_pure_oam_overlap_report.md](v5_pure_oam_overlap_report.md)。
+
 ## 文件清单
 
 ### 核心代码

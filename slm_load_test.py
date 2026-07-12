@@ -15,10 +15,16 @@ torch.manual_seed(42); np.random.seed(42)
 
 # ========== 1. 加载最新可用 checkpoint ==========
 import glob
-ckpts = sorted(glob.glob("oam_crypt_dnn_epoch_*.pth"))
-if not ckpts:
-    raise FileNotFoundError("未找到任何 oam_crypt_dnn_epoch_*.pth checkpoint")
-ckpt_path = ckpts[-1]  # 取最新的
+# 优先加载 v5 best (纯 OAM 重叠最佳),否则取最新
+v5_best = "v5_oam_overlap_best_14.17dB.pth"
+if os.path.exists(v5_best):
+    ckpt_path = v5_best
+    print(f"[v5 best] 优先使用 {v5_best}")
+else:
+    ckpts = sorted(glob.glob("oam_crypt_dnn_epoch_*.pth"), key=lambda x: int(x.split('_')[-1].split('.')[0]))
+    if not ckpts:
+        raise FileNotFoundError("未找到任何 oam_crypt_dnn_epoch_*.pth checkpoint")
+    ckpt_path = ckpts[-1]  # 取最大 epoch
 ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 print(f"加载 {ckpt_path}: PSNR_C={ckpt.get('psnr_center', float('nan')):.2f}dB")
 
@@ -50,13 +56,15 @@ with torch.no_grad():
         sample, m.CONFIG['l_auth'], rpp_system, m.CONFIG['z0'],
         m.CONFIG['wavelength'], m.CONFIG['pixel_size'], device,
         size=m.CONFIG['size'], z_list=m.CONFIG['z_list'],
-        obj_encoding=m.CONFIG['obj_encoding'], theta_max=theta_max
+        obj_encoding=m.CONFIG['obj_encoding'], theta_max=theta_max,
+        layout=m.CONFIG.get('layout', 'grid_2x5')
     )
     print(f"密文 (digital): |U|max={torch.abs(c_digital[0]).max().item():.4f}, mean={torch.abs(c_digital[0]).mean().item():.4f}")
 
     # 数字重建 (baseline)
     pred_digital = model(c_digital).clamp(0, 1)
-    tgt = m.build_target_grid(sample, device, size=m.CONFIG['size'])
+    tgt = m.build_target_grid(sample, device, size=m.CONFIG['size'],
+                              layout=m.CONFIG.get('layout', 'grid_2x5'))
     psnr_digital = m.calculate_center_psnr(pred_digital, tgt).item()
     print(f"数字仿真 PSNR_C: {psnr_digital:.2f} dB")
 
@@ -122,13 +130,18 @@ with torch.no_grad():
         # SLM
         axes[2, 1+j].imshow(pred_slm[0, j].cpu().numpy(), cmap='gray', vmin=0, vmax=1)
 
-        # PSNR per channel (用整个 2x5 网格对应位置)
-        # 通道 j 的位置: row=j//5, col=j%5
-        row_idx = j // 5
-        col_idx = j % 5
-        cell_h, cell_w = 216, 216
-        y = 324 + row_idx * cell_h
-        x = col_idx * cell_w
+        # PSNR per channel (根据 layout 自适应位置)
+        if m.CONFIG.get('layout', 'grid_2x5') == 'oam_overlap':
+            # v5: 全部 10 通道都在中心 216x216 同一位置 (y=432, x=432)
+            y, cell_h, cell_w = 432, 216, 216
+            x = 432
+        else:
+            # v3/v4: 2x5 网格对应位置
+            row_idx = j // 5
+            col_idx = j % 5
+            cell_h, cell_w = 216, 216
+            y = 324 + row_idx * cell_h
+            x = col_idx * cell_w
         mse_d = torch.mean((pred_digital[0, j, y:y+cell_h, x:x+cell_w] - tgt[0, j, y:y+cell_h, x:x+cell_w])**2)
         psnr_d_ch = -10*np.log10(mse_d.item()+1e-12)
         mse_s = torch.mean((pred_slm[0, j, y:y+cell_h, x:x+cell_w] - tgt[0, j, y:y+cell_h, x:x+cell_w])**2)

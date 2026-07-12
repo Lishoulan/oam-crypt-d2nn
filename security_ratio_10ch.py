@@ -80,14 +80,16 @@ def run_attack_test(model, rpp_system, test_loader, device):
     with torch.no_grad():
         for batch in test_loader:
             batch = batch.to(device)
-            tgt = build_target_grid(batch, device, size=CONFIG["size"])
+            tgt = build_target_grid(batch, device, size=CONFIG["size"],
+                                    layout=CONFIG.get("layout", "grid_2x5"))
 
             # 1. 合法解密
             c_auth = encrypt_batch(
                 batch, CONFIG["l_auth"], rpp_system,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                 size=CONFIG["size"], z_list=CONFIG["z_list"],
-                obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
+                layout=CONFIG.get("layout", "grid_2x5")
             )
             p_auth = model(c_auth)
 
@@ -97,7 +99,8 @@ def run_attack_test(model, rpp_system, test_loader, device):
                 batch, CONFIG["l_auth"], rpp_wrong,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                 size=CONFIG["size"], z_list=CONFIG["z_list"],
-                obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
+                layout=CONFIG.get("layout", "grid_2x5")
             )
             p_rpp = model(c_rpp)
 
@@ -106,7 +109,8 @@ def run_attack_test(model, rpp_system, test_loader, device):
                 batch, l_wrong_full, rpp_system,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
                 size=CONFIG["size"], z_list=CONFIG["z_list"],
-                obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad
+                obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
+                layout=CONFIG.get("layout", "grid_2x5")
             )
             p_oam = model(c_oam)
 
