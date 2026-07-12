@@ -4,6 +4,7 @@
 ================================================================
 多平面 OAM 复用全息 + 双相位编码 (纯相位 SLM 兼容)
 10 通道 OAM-MDNN (Milestone v2.0, 仿北理工 Nature Photonics 2026)
+v4 优化: Attention U-Net + 15 epoch 训练 + 启用安全损失
 
 物理流程：
   加密: 明文 P_i -> 相位 exp(iπP_i) -> ASM(z_i) [每路不同 z_i, 多平面复用]
@@ -50,16 +51,17 @@ CONFIG = {
     "l_auth": [-25, -20, -15, -10, -5, 5, 10, 15, 20, 25],  # 10 个 OAM 通道 (5 对, 大步长 ±5)
     "l_wrong": [-30, -23, -12, -8, -3, 7, 12, 18, 23, 28],  # 错误 OAM 密钥 (10 个, 远离授权值)
     "batch_size": 1,           # 批大小 (3层D2NN+安全损失显存大, 降至1防OOM; 梯度累积补回有效批)
-    "epochs": 8,               # v3 10 通道: 8 epoch (北理工 10 通道论文同规模)
+    "epochs": 5,               # v4 优化: 8→5 epoch (v3 8 epoch 30.85 dB; Attention U-Net 5 epoch 应达 31+ dB)
     "lr": 3e-4,                # U-Net 精修层学习率 (Phase 1 修复: 降低 LR 避免损失爆炸)
     "lr_d2nn": 0.05,           # D2NN 物理层学习率 (降低)
     "mid_ch": 64,             # U-Net 中间通道数 (Phase 1: 减到 64 加快训练)
     "num_layers": 2,          # 衍射层数 (借鉴文章 2 层无源衍射片设计)
     "freeze_epochs": 0,       # 0=不冻结
-    "warmup_epochs": 15,      # Phase 1: 全部 warmup, 不启用安全损失 (专注重建质量)
-    "sec_weight": 0.0,        # Phase 1: 关闭安全损失, 验证 PSNR 上限
-    "xtalk_weight": 0.0,      # Phase 1: 关闭串扰损失 (单通道无串扰)
-    "l1_weight": 0.0,         # L1 损失权重
+    "warmup_epochs": 2,       # v4 优化: warmup 2 epoch 纯重建, epoch 3-5 启用安全损失(0.1 权重)
+    "sec_weight": 0.1,        # v4 优化: 启用小权重安全损失(0.1), 训练 SecurityRatio < 0.3
+    "xtalk_weight": 0.0,      # 关闭串扰损失 (单通道无串扰)
+    "l1_weight": 0.1,         # v4 优化: 启用 L1 损失 0.1 权重(配合 MSE 提升锐度)
+    "quick_test_n": 1600,     # v4 训练: 用全量 1600 样本(默认)
     # 物光编码模式: "amplitude" = sqrt(P) 振幅编码 (有平面选择性, 配合双相位编码兼容纯相位SLM)
     #               "phase" = exp(iπP) 相位编码 (无平面选择性, 但天然纯相位)
     "obj_encoding": "phase",   # Phase 1: 相位编码 (无 sqrt 开方损耗, PSNR 上限 27+ dB)
@@ -332,10 +334,59 @@ class MNISTQuadDataset(Dataset):
 # 阶段5：解密网络架构
 # ==========================================
 
+class AttentionGate(nn.Module):
+    """
+    Attention Gate (Oktay et al. 2018, Attention U-Net).
+    用于 skip connection, 让 decoder 选择性关注 encoder 的相关特征。
+    Args:
+        gate_ch: gating signal 通道数 (来自 decoder 较深层)
+        in_ch:   skip connection 通道数 (来自 encoder)
+        inter_ch: 中间通道数(默认 gate_ch // 2)
+    """
+    def __init__(self, gate_ch, in_ch, inter_ch=None):
+        super().__init__()
+        inter_ch = inter_ch or max(gate_ch // 2, in_ch // 2)
+        self.W_g = nn.Sequential(
+            nn.Conv2d(gate_ch, inter_ch, 1, bias=False),
+            nn.BatchNorm2d(inter_ch),
+        )
+        self.W_x = nn.Sequential(
+            nn.Conv2d(in_ch, inter_ch, 1, bias=False),
+            nn.BatchNorm2d(inter_ch),
+        )
+        self.psi = nn.Sequential(
+            nn.Conv2d(inter_ch, 1, 1, bias=False),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid(),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x, g):
+        """
+        Args:
+            x: encoder skip features (B, in_ch, H, W)
+            g: decoder gating signal (B, gate_ch, H', W')
+        Returns:
+            attended: x * attention_coefficient (B, in_ch, H, W)
+        """
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        # gating signal 和 skip 尺寸对齐
+        if g1.shape[-2:] != x1.shape[-2:]:
+            g1 = F.interpolate(g1, size=x1.shape[-2:], mode='bilinear', align_corners=False)
+        psi = self.relu(g1 + x1)
+        att = self.psi(psi)
+        return x * att
+
+
 class UNetRefine(nn.Module):
     """
-    U-Net 精修网络: 编码器-解码器 + 跳连, 多尺度特征融合。
+    Attention U-Net 精修网络 (Oktay et al. 2018 改进版):
+      编码器(3层下采样) + Bottleneck(1层) + 解码器(3层上采样) +
+      Attention Gate (每个 skip connection) + 输出层 + 残差连接
+
     使用 F.interpolate 代替 MaxPool/ConvTranspose, 支持任意尺寸输入 (含非 2 幂次, 如 1080)。
+    相比基础 U-Net, attention 让网络自适应选择对当前通道重要的特征。
     """
     def __init__(self, in_ch=1, out_ch=1, mid_ch=64):
         super().__init__()
@@ -355,6 +406,11 @@ class UNetRefine(nn.Module):
         self.dec2 = self._conv_block(mid_ch * 4, mid_ch * 2)
         self.up1_conv = nn.Conv2d(mid_ch * 2, mid_ch, 1)
         self.dec1 = self._conv_block(mid_ch * 2, mid_ch)
+
+        # Attention Gates (skip connections: e3->d3, e2->d2, e1->d1)
+        self.att3 = AttentionGate(gate_ch=mid_ch * 4, in_ch=mid_ch * 4)
+        self.att2 = AttentionGate(gate_ch=mid_ch * 2, in_ch=mid_ch * 2)
+        self.att1 = AttentionGate(gate_ch=mid_ch,     in_ch=mid_ch)
 
         self.out_conv = nn.Conv2d(mid_ch, out_ch, 1)
         self.skip = nn.Conv2d(in_ch, out_ch, 1)
@@ -392,14 +448,22 @@ class UNetRefine(nn.Module):
         e3 = self.enc3(self._down(e2))                     # (B, 4mid, H/4, W/4)
         b = self.bot(self._down(e3))                       # (B, 8mid, H/8, W/8)
 
-        d3 = self.dec3(torch.cat([self._up(self.up3_conv(b), e3.shape[-2:]), e3], dim=1))
-        d2 = self.dec2(torch.cat([self._up(self.up2_conv(d3), e2.shape[-2:]), e2], dim=1))
-        d1 = self.dec1(torch.cat([self._up(self.up1_conv(d2), e1.shape[-2:]), e1], dim=1))
+        # Decoder + Attention Gates
+        u3 = self.up3_conv(b)
+        e3_att = self.att3(e3, u3)                          # attention on skip e3
+        d3 = self.dec3(torch.cat([self._up(u3, e3.shape[-2:]), e3_att], dim=1))
+
+        u2 = self.up2_conv(d3)
+        e2_att = self.att2(e2, u2)                          # attention on skip e2
+        d2 = self.dec2(torch.cat([self._up(u2, e2.shape[-2:]), e2_att], dim=1))
+
+        u1 = self.up1_conv(d2)
+        e1_att = self.att1(e1, u1)                          # attention on skip e1
+        d1 = self.dec1(torch.cat([self._up(u1, e1.shape[-2:]), e1_att], dim=1))
 
         out = self.out_conv(d1)
-        # Phase 1 修复: 移除 ReLU (MSE+ReLU+稀疏目标会导致 all-zero 崩塌)
-        # 改用线性输出 + 中心区域损失加权, 让模型专注于图像区域
-        return out + self.skip(x_norm)  # 无激活, 损失函数中 clamp + 加权
+        # 线性输出 + 残差连接, 损失函数中 clamp + 加权
+        return out + self.skip(x_norm)
 
 
 class OAM_Crypt_D2NN(nn.Module):
@@ -634,8 +698,11 @@ if __name__ == "__main__":
     full_test = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
 
     # 子集采样 (v3 10 通道: 1600 训练 / 400 测试, 每 10 张为一组, 得 160/40 组)
-    mnist_train = Subset(full_train, range(1600))
-    mnist_test = Subset(full_test, range(400))
+    # v4 smoke test: quick_test_n 限制样本数(默认 None=全部 1600)
+    n_train = CONFIG.get("quick_test_n", None) or 1600
+    n_test = CONFIG.get("quick_test_n", None) or 400
+    mnist_train = Subset(full_train, range(n_train))
+    mnist_test = Subset(full_test, range(n_test))
 
     # 图像区域 size//5 (216x216, 2x5 网格布局, 每格方形)
     # v3 10 通道: 5 列布局, width=1080/5=216; 2 行, 2*216=432, padding 上下 324
@@ -874,7 +941,8 @@ if __name__ == "__main__":
                 'sec_ratio': avg_sr_oam,
                 'sr_rpp': avg_sr_rpp,
                 'sr_oam': avg_sr_oam,
-            }, f"oam_crypt_dnn_epoch_{epoch}.pth")
+            }, os.path.join(os.path.dirname(os.path.abspath(__file__)), f"oam_crypt_dnn_epoch_{epoch}.pth"))
+            print(f"  [SAVE] Checkpoint saved to oam_crypt_dnn_epoch_{epoch}.pth", flush=True)
 
             # 缓存最后一个测试样本用于最终可视化
             last_cipher_auth, last_pred_auth, last_tgt = c_auth, p_auth, tgt
