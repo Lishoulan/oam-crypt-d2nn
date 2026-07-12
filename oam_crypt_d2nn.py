@@ -57,11 +57,12 @@ CONFIG = {
     "mid_ch": 64,             # U-Net 中间通道数 (Phase 1: 减到 64 加快训练)
     "num_layers": 2,          # 衍射层数 (借鉴文章 2 层无源衍射片设计)
     "freeze_epochs": 0,       # 0=不冻结
-    "warmup_epochs": 2,       # v4 优化: warmup 2 epoch 纯重建, epoch 3-5 启用安全损失(0.1 权重)
-    "sec_weight": 0.1,        # v4 优化: 启用小权重安全损失(0.1), 训练 SecurityRatio < 0.3
+    "warmup_epochs": 15,      # v4 fast: 全部 warmup, sec_weight=0 不启用 (5 epoch ~8 分钟)
+    "sec_weight": 0.0,        # v4 fast: 关闭安全损失 (SecurityRatio 后续单独测)
     "xtalk_weight": 0.0,      # 关闭串扰损失 (单通道无串扰)
     "l1_weight": 0.1,         # v4 优化: 启用 L1 损失 0.1 权重(配合 MSE 提升锐度)
     "quick_test_n": 1600,     # v4 训练: 用全量 1600 样本(默认)
+
     # 物光编码模式: "amplitude" = sqrt(P) 振幅编码 (有平面选择性, 配合双相位编码兼容纯相位SLM)
     #               "phase" = exp(iπP) 相位编码 (无平面选择性, 但天然纯相位)
     "obj_encoding": "phase",   # Phase 1: 相位编码 (无 sqrt 开方损耗, PSNR 上限 27+ dB)

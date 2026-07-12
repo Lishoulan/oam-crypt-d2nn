@@ -11,9 +11,14 @@ from matplotlib.colors import LinearSegmentedColormap
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.manual_seed(42); np.random.seed(42)
 
-# ========== 1. 加载 Phase 2 最佳模型 (4 通道) ==========
-ckpt = torch.load("oam_crypt_dnn_epoch_8.pth", map_location=device)
-print(f"加载 Epoch 8: PSNR_C={ckpt['psnr_center']:.2f}dB")
+# ========== 1. 加载最新可用 checkpoint ==========
+import glob
+ckpts = sorted(glob.glob("oam_crypt_dnn_epoch_*.pth"))
+if not ckpts:
+    raise FileNotFoundError("未找到任何 oam_crypt_dnn_epoch_*.pth checkpoint")
+ckpt_path = ckpts[-1]  # 取最新的
+ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+print(f"加载 {ckpt_path}: PSNR_C={ckpt.get('psnr_center', float('nan')):.2f}dB")
 
 rpp_system = m.generate_rpp(m.CONFIG['size'], device)
 theta_max = np.deg2rad(m.CONFIG['theta_max_deg'])
