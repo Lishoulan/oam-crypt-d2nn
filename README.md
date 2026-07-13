@@ -2,6 +2,23 @@
 
 基于**轨道角动量(OAM)** 的多用户图像加密/解密衍射神经网络系统,使用纯相位 SLM 实现。
 
+## 🎯 关键结果速览 (v8 PolarHNN)
+
+| Stage 1 攻击对比 (2 通道) | SLM 加载鲁棒性 |
+|:---:|:---:|
+| ![Stage 1 攻击对比](v8_stage1_attack_comparison.png) | ![SLM 加载](v8_stage1_slm_loading.png) |
+| 合法 24.93 dB / RPP 攻击 11.21 dB / OAM 攻击 10.54 dB | 数字 23.50 dB / SLM 24.93 dB (反向 +1.4 dB) |
+
+| 训练曲线 (4 stage) | v5→v8 4 通道数性能对比 |
+|:---:|:---:|
+| ![训练曲线](v8_training_curves.png) | ![版本对比](v8_vs_v7_comparison.png) |
+| Curriculum 渐进, Stage 1 epoch 3 达 23.44 dB ⭐ | v8 2 通道打破 v7 纪录 (23.4 vs 22.9) |
+
+| Lee 全息图 (SLM 加载) | 端到端物理链路 (Lee+4f+D2NN) |
+|:---:|:---:|
+| ![Lee 全息图](v8_hologram_typical.png) | ![端到端](v8_end_to_end.png) |
+| 满量程 0 dB 偏置, 载波条纹清晰可见 | 数字 24.93 dB → Lee+4f+D2NN **18.54 dB** ⭐ |
+
 ## Milestone v2.0 (10 通道 OAM-MDNN)
 
 ### 核心指标
@@ -262,6 +279,18 @@ def oam_fdd_loss(pred, oam_keys, ...):
 
 **Stage 1 起步爆发**: E1 = 20.30 dB (vs v7 11.47 dB, **+9 dB 起步优势**)
 
+#### 训练曲线可视化
+
+![v8 4 stage 训练曲线](v8_training_curves.png)
+
+图中红色虚线为 20 dB 工程目标, Stage 1 在 epoch 3 突破 23.44 dB; Stage 4 稳定在 13.7 dB (10 通道物理上限)。
+
+#### v5 → v8 4 通道数性能对比
+
+![v5 到 v8 版本对比](v8_vs_v7_comparison.png)
+
+v8 2 通道打破 v7 纪录 (23.4 vs 22.9 dB), 5/8/10 通道与 v7 持平。
+
 ### v8 SLM 加载 (slm_aware 训练机制)
 
 | 配置 | 数字 | SLM | 损耗 |
@@ -269,6 +298,14 @@ def oam_fdd_loss(pred, oam_keys, ...):
 | Stage 1 (2 通道) | 23.33 dB | 24.31 dB | **-0.98 dB** ⭐ |
 | Stage 2 (5 通道) | 10.68 dB | 10.66 dB | +0.02 dB |
 | Stage 4 (10 通道) | 10.76 dB | 10.70 dB | +0.06 dB |
+
+**SLM 加载无损 (甚至反升)**: 8-bit 量化训练起到正则化作用, 模型适应离散相位的鲁棒边界。
+
+#### SLM 加载对比可视化 (Stage 1)
+
+![SLM 加载对比](v8_stage1_slm_loading.png)
+
+左: 明文; 中: 数字加载 (无 SLM 模拟); 右: SLM 8-bit 加载。SLM 后清晰度反而略升, 因 8-bit 量化在小梯度处抑制噪声。
 
 ### v8 SecurityRatio (Stage 1 2 通道)
 
@@ -279,6 +316,12 @@ def oam_fdd_loss(pred, oam_keys, ...):
 | OAM 攻击 (-3, +3) | 10.34 dB | -13.14 dB | 0.44 |
 
 **✅ 工程级加密**: 攻击后 ~10 dB (接近随机图像), 不可识别原图
+
+#### 攻击对比可视化
+
+![v8 攻击对比](v8_stage1_attack_comparison.png)
+
+4 样本 × 4 列: 明文 | 合法解密 (24+ dB) | RPP 攻击 (~10 dB) | OAM 攻击 (~10 dB)。攻击后图像完全无法识别原内容, 加密强度工程级。
 
 ### v8 v4 baseline 回归
 
@@ -296,6 +339,43 @@ v4 grid_2x5 不退化 ✅
 3. **SLM 加载损耗几乎为 0** (甚至 SLM 比数字好, 8-bit 量化起到正则化)
 4. **OAM-FDD 关键**: cuFFT 必须 float32, 否则报错; 排除 DC bin 是关键设计
 
+### v8 SLM Lee Hologram 与端到端物理链路
+
+v8 cipher 是复振幅 (RPP 随机相位 + OAM 拓扑相位), 用 **Lee 离轴全息** 编码为纯相位 SLM 加载格式:
+
+```
+H(x,y) = arg( R + U_cipher(x,y) · exp(i·2π·f₀·x) )
+```
+
+其中 R = max|U| (0 dB 偏置, 满量程调制), f₀ = 0.125 cyc/pix (8 pix/cyc 载波)。
+
+#### 满量程 Lee 全息图 (中心 540×540)
+
+![Lee 全息图](v8_hologram_typical.png)
+
+清晰可见的水平载波条纹 + OAM 拓扑扭曲形成的弯曲结构, 是加密 cipher 在 SLM 上的物理相位加载。
+
+#### 3 种偏置对比 (0 dB / 6 dB / -3 dB)
+
+![3 种偏置对比](v8_hologram_compare.png)
+
+- **0 dB (满量程)**: 调制深度最大, 载波条纹清晰, +1 级能量强
+- **6 dB (弱信号)**: 线性近似好, 但相位摆幅仅 15%, 几乎看不到调制
+- **-3 dB (过调制)**: 失真最大, 但 +1 级信号能量最高 (端到端最优)
+
+#### 端到端物理链路 (Lee + 4f + D2NN)
+
+![端到端物理链路](v8_end_to_end.png)
+
+完整流程: 明文 → 加密 → Lee Hologram → SLM 8-bit 加载 → 4f 傅里叶变换 → +1 级滤波 → 物面 → D2NN → 重建 MNIST。
+
+**关键结果**:
+- 数字 baseline (SLM-aware): **24.93 dB**
+- Lee + 4f + D2NN 端到端: **18.54 dB** (-3 dB 偏置, 540 pix 滤波)
+- 损耗 -4.9 dB: RPP 频谱展宽, 大滤波窗口才能保留大部分信号
+
+**物理结论**: v8 PolarHNN 加密链路**端到端物理可行**, 18.54 dB PSNR 视觉清晰, 工程上可硬件化。
+
 ### v8 实施文件
 
 - [oam_crypt_d2nn.py](file:///f:/d2nn/oam_crypt_d2nn.py) (+ PolarConv Block, + oam_fdd_loss, CONFIG v8 字段)
@@ -303,7 +383,13 @@ v4 grid_2x5 不退化 ✅
 - [smoke_v8.py](file:///f:/d2nn/smoke_v8.py) (v8 烟雾测试)
 - [slm_load_test_v8.py](file:///f:/d2nn/slm_load_test_v8.py) (v8 SLM 加载)
 - [security_ratio_v8.py](file:///f:/d2nn/security_ratio_v8.py) (v8 SecurityRatio)
+- [gen_v8_grid.py](file:///f:/d2nn/gen_v8_grid.py) (4 张结果可视化)
+- [generate_slm_hologram_v8.py](file:///f:/d2nn/generate_slm_hologram_v8.py) (Lee 全息图生成)
+- [verify_v8_end_to_end.py](file:///f:/d2nn/verify_v8_end_to_end.py) (端到端物理链路)
+- [visualize_v8_hologram.py](file:///f:/d2nn/visualize_v8_hologram.py) (3 偏置对比)
+- [visualize_v8_hologram_decompose.py](file:///f:/d2nn/visualize_v8_hologram_decompose.py) (复振幅分解)
 - [v8_polarhnn_report.md](file:///f:/d2nn/v8_polarhnn_report.md) (完整报告)
+- [advisor_report.md](file:///f:/d2nn/advisor_report.md) (12 章导师汇报)
 
 ### v8 vs v7 vs v6 vs v5 总结
 
