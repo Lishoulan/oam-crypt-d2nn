@@ -36,17 +36,23 @@ ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 print(f"\n[加载] {ckpt_path}: PSNR_C={ckpt.get('psnr_center', float('nan')):.2f}dB")
 
 theta_max = np.deg2rad(CONFIG["theta_max_deg"])
+# v4 baseline 用 mid_ch=64 (老架构), v7 改 48, 此处强制 64 兼容 v4 ckpt
+v4_mid_ch = 64
 model = m.OAM_Crypt_D2NN(
     size=CONFIG["size"], num_layers=CONFIG["num_layers"],
     wavelength=CONFIG["wavelength"], pixel_size=CONFIG["pixel_size"],
     z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp_system,
     oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"],
     obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max,
-    slm_aware=CONFIG["slm_aware"]
+    slm_aware=CONFIG["slm_aware"],
+    mid_ch=v4_mid_ch,
+    use_channel_attn=False,  # v4 没有 ChannelAttention
+    iterative_refine=False,  # v4 没有 Iterative
+    oam_freq_filter=False,  # v4 没有 OAMFreqFilter
 ).to(device)
 
 if "model_state_dict" in ckpt:
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
 else:
     model.load_state_dict(ckpt)
 model.eval()

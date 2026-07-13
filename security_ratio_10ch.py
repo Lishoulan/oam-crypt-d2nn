@@ -38,34 +38,51 @@ from oam_crypt_d2nn import (
 
 
 def load_model(checkpoint_path, device):
-    """加载训练好的 model"""
+    """加载训练好的 model (v7 兼容: 从 ckpt 读 l_auth/z_list, strict=False)"""
     rpp = generate_rpp(CONFIG["size"], device, generator=torch.Generator(device).manual_seed(0))
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # v7 ckpt 含 l_auth/z_list, v6 旧 ckpt 退化到 CONFIG 默认
+    if "model_state_dict" in ckpt:
+        state = ckpt["model_state_dict"]
+    else:
+        state = ckpt
+    l_auth_ckpt = ckpt.get("l_auth", CONFIG["l_auth"])
+    z_list_ckpt = ckpt.get("z_list", CONFIG["z_list"])
+
     model = OAM_Crypt_D2NN(
         size=CONFIG["size"], num_layers=CONFIG["num_layers"],
         wavelength=CONFIG["wavelength"], pixel_size=CONFIG["pixel_size"],
         z_layer=CONFIG["z_layer"], z0=CONFIG["z0"], rpp=rpp,
-        oam_keys=CONFIG["l_auth"], z_list=CONFIG["z_list"],
+        oam_keys=l_auth_ckpt, z_list=z_list_ckpt,
         obj_encoding=CONFIG["obj_encoding"],
         theta_max=CONFIG["theta_max_deg"] * np.pi / 180,
         slm_aware=CONFIG["slm_aware"],
+        use_channel_attn=CONFIG.get("use_channel_attn", True),
+        mid_ch=CONFIG.get("mid_ch", 48),
+        iterative_refine=CONFIG.get("iterative_refine", False),
+        n_passes=CONFIG.get("n_passes", 3),
+        oam_freq_filter=CONFIG.get("oam_freq_filter", True),
     ).to(device)
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    if "model_state_dict" in ckpt:
-        model.load_state_dict(ckpt["model_state_dict"])
-    else:
-        model.load_state_dict(ckpt)
+    model.load_state_dict(state, strict=False)  # v7 兼容 (旧 ckpt 无 context_proj)
     model.eval()
+    print(f"  [v7 兼容] l_auth={l_auth_ckpt[:3]}... z_list={z_list_ckpt[:3]}...", flush=True)
     return model, rpp
 
 
-def run_attack_test(model, rpp_system, test_loader, device):
+def run_attack_test(model, rpp_system, test_loader, device, l_auth=None, z_list=None):
     """
     对测试集做攻击测试
     Returns:
         results: dict of lists
     """
-    num_channels = len(CONFIG["l_auth"])
+    # v7 兼容: 默认用 CONFIG, 但允许 ckpt 传入 l_auth/z_list
+    if l_auth is None:
+        l_auth = CONFIG["l_auth"]
+    if z_list is None:
+        z_list = CONFIG["z_list"]
+    num_channels = len(l_auth)
     theta_max_rad = CONFIG["theta_max_deg"] * np.pi / 180
 
     psnr_auth_list = []
@@ -74,8 +91,8 @@ def run_attack_test(model, rpp_system, test_loader, device):
     sr_rpp_list = []
     sr_oam_list = []
 
-    # 错误 OAM 密钥(全部 10 个)
-    l_wrong_full = CONFIG["l_wrong"][:num_channels]
+    # 错误 OAM 密钥(数量匹配 num_channels)
+    l_wrong_full = CONFIG["l_wrong"][:num_channels] if len(CONFIG["l_wrong"]) >= num_channels else CONFIG["l_wrong"]
 
     with torch.no_grad():
         for batch in test_loader:
@@ -85,9 +102,9 @@ def run_attack_test(model, rpp_system, test_loader, device):
 
             # 1. 合法解密
             c_auth = encrypt_batch(
-                batch, CONFIG["l_auth"], rpp_system,
+                batch, l_auth, rpp_system,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                size=CONFIG["size"], z_list=CONFIG["z_list"],
+                size=CONFIG["size"], z_list=z_list,
                 obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
                 layout=CONFIG.get("layout", "grid_2x5")
             )
@@ -96,9 +113,9 @@ def run_attack_test(model, rpp_system, test_loader, device):
             # 2. RPP 攻击
             rpp_wrong = generate_rpp(CONFIG["size"], device)
             c_rpp = encrypt_batch(
-                batch, CONFIG["l_auth"], rpp_wrong,
+                batch, l_auth, rpp_wrong,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                size=CONFIG["size"], z_list=CONFIG["z_list"],
+                size=CONFIG["size"], z_list=z_list,
                 obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
                 layout=CONFIG.get("layout", "grid_2x5")
             )
@@ -108,7 +125,7 @@ def run_attack_test(model, rpp_system, test_loader, device):
             c_oam = encrypt_batch(
                 batch, l_wrong_full, rpp_system,
                 CONFIG["z0"], CONFIG["wavelength"], CONFIG["pixel_size"], device,
-                size=CONFIG["size"], z_list=CONFIG["z_list"],
+                size=CONFIG["size"], z_list=z_list,
                 obj_encoding=CONFIG["obj_encoding"], theta_max=theta_max_rad,
                 layout=CONFIG.get("layout", "grid_2x5")
             )
@@ -220,7 +237,11 @@ def main():
         root='./data', train=False, download=True, transform=transform
     )
     subset = Subset(full_test, range(args.n_test))
-    num_channels = len(CONFIG["l_auth"])
+    # v7 兼容: 先读 ckpt, 用 ckpt 的 l_auth/z_list 决定 num_channels
+    ckpt_preview = torch.load(args.checkpoint, map_location='cpu', weights_only=False) if os.path.exists(args.checkpoint) else None
+    l_auth_ckpt = ckpt_preview.get("l_auth", CONFIG["l_auth"]) if ckpt_preview else CONFIG["l_auth"]
+    z_list_ckpt = ckpt_preview.get("z_list", CONFIG["z_list"]) if ckpt_preview else CONFIG["z_list"]
+    num_channels = len(l_auth_ckpt)
     img_size = CONFIG["size"] // 5
     from oam_crypt_d2nn import MNISTQuadDataset
     test_dataset = MNISTQuadDataset(subset, img_size=img_size, num_channels=num_channels)
@@ -240,9 +261,10 @@ def main():
     model, rpp_system = load_model(args.checkpoint, device)
     print(f"  ✓ 模型已加载")
 
-    # 3. 攻击测试
+    # 3. 攻击测试 (用 ckpt 的 l_auth/z_list)
     print(f"\n[2/3] 攻击测试 (n={args.n_test})...")
-    results = run_attack_test(model, rpp_system, test_loader, device)
+    results = run_attack_test(model, rpp_system, test_loader, device,
+                              l_auth=l_auth_ckpt, z_list=z_list_ckpt)
 
     # 4. 报告
     print_report(results)
