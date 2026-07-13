@@ -75,13 +75,13 @@ CONFIG = {
     "curriculum": True,
     "curriculum_stages": [
         # stage 1: 2 通道 (最小,最易分) - l=±25
-        {"n_channels": 2, "l_auth": [-25, 25],       "epochs": 8,  "lr": 5e-4,  "z_list": [0.10, 0.55]},
+        {"n_channels": 2, "l_auth": [-25, 25],       "epochs": 6,  "lr": 5e-4,  "z_list": [0.10, 0.55]},
         # stage 2: 5 通道 (奇数非对称) - 加 ±20, ±15
-        {"n_channels": 5, "l_auth": [-25, -15, 0, 15, 25],   "epochs": 10, "lr": 4e-4, "z_list": [0.10, 0.20, 0.35, 0.45, 0.55]},
+        {"n_channels": 5, "l_auth": [-25, -15, 0, 15, 25],   "epochs": 6, "lr": 4e-4, "z_list": [0.10, 0.20, 0.35, 0.45, 0.55]},
         # stage 3: 8 通道 (原 10 减掉 2 个最难分)
-        {"n_channels": 8, "l_auth": [-25, -20, -15, -10, 10, 15, 20, 25], "epochs": 10, "lr": 3e-4, "z_list": [0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.55, 0.60]},
+        {"n_channels": 8, "l_auth": [-25, -20, -15, -10, 10, 15, 20, 25], "epochs": 6, "lr": 3e-4, "z_list": [0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.55, 0.60]},
         # stage 4: 10 通道 (完整) - 全 10 路
-        {"n_channels": 10, "l_auth": [-25, -20, -15, -10, -5, 5, 10, 15, 20, 25], "epochs": 22, "lr": 3e-4, "z_list": [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]},
+        {"n_channels": 10, "l_auth": [-25, -20, -15, -10, -5, 5, 10, 15, 20, 25], "epochs": 14, "lr": 3e-4, "z_list": [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]},
     ],
     "curriculum_psnr_threshold": 18.0,  # 达到此 PSNR_C 才推进到下一 stage (否则继续当前 stage)
 
@@ -101,6 +101,31 @@ CONFIG = {
     "oam_freq_filter": True,
     "oam_filter_bandwidth": 0.15,  # 谐波带通宽度 (相对第 l 阶, 0.15 = ±15%)
     "oam_filter_strength": 0.5,    # 滤波强度 (0=不滤波, 1=完全带阻), 软启动
+
+    # v8 新物理范式 (PolarHNN: Polar Holographic Neural Network)
+    # 核心洞察: OAM 拓扑荷 l 是极坐标方位角谐波 exp(ilθ), 笛卡尔卷积不直接捕获此结构
+    # 三大创新: PolarConv + OAM-FDD Loss + Multi-scale OAM 频域解码
+    #
+    # 创新 1: PolarConv (极坐标卷积) - 在 U-Net bottleneck 引入 (r, θ) 极坐标 1D 卷积
+    #   物理: 沿 θ 方向 1D 卷积天然对应 OAM 方位角谐波滤波
+    #   实施: 笛卡尔 -> 极坐标 (grid_sample) -> 沿 θ + r 1D conv -> 笛卡尔
+    "polar_conv": True,             # v8 主开关: 在 UNetRefine bottleneck 加 PolarConv
+    "polar_n_r": 32,                # 极坐标 r 方向采样数 (降低避免 OOM)
+    "polar_n_theta": 96,           # 极坐标 θ 方向采样数 (OAM l_max=25 需 >50 满足采样定理)
+    "polar_theta_kernel": 7,       # θ 方向 1D 卷积核大小
+    "polar_init_scale": 0.0,       # 残差缩放初始值 (0=训练初期不扰动)
+
+    # 创新 2: OAM-FDD Loss (OAM 频域正交损失) - 显式约束通道 j 能量集中在 l_j 谐波
+    #   物理: 通道 j 解密后应只在第 l_j 阶方位角谐波处有能量, 其他谐波应接近 0
+    #   损失: 1 - E_self (最大化自身 l 附近) + λ * E_other (最小化其他 l 附近)
+    "oam_fdd_loss": True,          # v8 开关
+    "oam_fdd_l_radius": 15,        # 谐波匹配半径 (bin 索引), 1080 W 维下 ±15 bin ≈ 2.8% 带宽
+    "oam_fdd_weight": 0.05,        # OAM-FDD 损失权重 (相对 MSE 损失)
+
+    # 创新 3: Multi-scale OAM 频域解码 (在 D2NN 之后, U-Net 之前的多频率分支)
+    #   物理: OAM 频率 = l 阶谐波; 不同 l 通道在不同 z 平面聚焦; 多频率并行解码
+    #   实施: 提取 OAM 频域 (W 维 FFT) 几个谐波 bin, 加权融合
+    "multi_scale_oam": False,      # v8 默认关闭, 显存压力大; 后续 v8.1 启用
 
     # 物光编码模式: "amplitude" = sqrt(P) 振幅编码 (有平面选择性, 配合双相位编码兼容纯相位SLM)
     #               "phase" = exp(iπP) 相位编码 (无平面选择性, 但天然纯相位)
@@ -468,6 +493,119 @@ class OAMFreqFilter(nn.Module):
         return x_filtered
 
 
+class PolarConv(nn.Module):
+    """
+    v8 新物理范式 1: PolarConv (极坐标卷积)
+
+    物理动机:
+      OAM 拓扑荷 l 是光场在极坐标 (r, θ) 中方位角 θ 的第 l 阶谐波
+      exp(ilθ) 沿 θ 方向有 l 个周期。笛卡尔卷积 (3×3) 不直接捕获此
+      方位角结构, 因为卷积核对方位角方向不敏感。
+
+    实施:
+      1. 笛卡尔 -> 极坐标: 双线性插值 (grid_sample) 从 (H, W) 笛卡尔网格
+         采样到 (n_r, n_theta) 极坐标网格
+      2. 沿 θ 方向 1D 深度可分离卷积: 等价于在方位角谐波空间滤波
+         kernel_size=7 覆盖约 7 个相邻谐波 bin
+      3. 沿 r 方向 1D 深度可分离卷积: 捕获径向结构
+      4. 极坐标 -> 笛卡尔: 反向 grid_sample 回到 (H, W) 笛卡尔网格
+      5. 残差连接 + scale 缩放 (init=0 训练初期不扰动)
+
+    显存优化:
+      - n_r=32, n_theta=96: 总采样点 3072 (vs 270×270=72900), 大幅降低
+      - 极坐标特征 (B, C, 32, 96) 而非 (B, C, 270, 270), 节省 ~7× 显存
+      - 深度可分离卷积 (groups=C): 进一步降低参数量和计算量
+
+    放置位置: UNetRefine bottleneck 处 (270×270, mid_ch*4=192 通道)
+    """
+    def __init__(self, channels, n_r=32, n_theta=96, theta_kernel=7, init_scale=0.0):
+        super().__init__()
+        self.channels = channels
+        self.n_r = n_r
+        self.n_theta = n_theta
+        # 沿 θ 方向 1D 深度可分离卷积 (捕获 OAM 方位角谐波)
+        self.theta_conv = nn.Conv1d(channels, channels, kernel_size=theta_kernel,
+                                     padding=theta_kernel // 2, groups=channels, bias=False)
+        self.theta_pointwise = nn.Conv1d(channels, channels, kernel_size=1, bias=True)
+        # 沿 r 方向 1D 深度可分离卷积 (捕获径向结构)
+        self.r_conv = nn.Conv1d(channels, channels, kernel_size=3,
+                                padding=1, groups=channels, bias=False)
+        self.r_pointwise = nn.Conv1d(channels, channels, kernel_size=1, bias=True)
+        # 残差缩放 (init=0 训练初期等于恒等)
+        self.scale = nn.Parameter(torch.tensor(init_scale, dtype=torch.float32))
+        # 极坐标 -> 笛卡尔 笛卡尔坐标索引缓存 (延迟到 forward 第一次创建, 跟随 device)
+
+    def _make_polar_sample_grid(self, H, W, device):
+        """生成 (n_r, n_theta, 2) 极坐标 -> 笛卡尔 grid, 笛卡尔 grid 归一化到 [-1,1]"""
+        cx, cy = W / 2.0, H / 2.0
+        R_max = min(cx, cy)
+        r = torch.linspace(0, R_max, self.n_r, device=device)
+        theta = torch.linspace(0, 2 * np.pi, self.n_theta, device=device)
+        r_grid, theta_grid = torch.meshgrid(r, theta, indexing='ij')  # (n_r, n_theta)
+        x_polar = cx + r_grid * torch.cos(theta_grid)
+        y_polar = cy + r_grid * torch.sin(theta_grid)
+        x_norm = 2 * x_polar / (W - 1) - 1
+        y_norm = 2 * y_polar / (H - 1) - 1
+        grid = torch.stack([x_norm, y_norm], dim=-1)  # (n_r, n_theta, 2)
+        return grid
+
+    def _make_full_polar_grid(self, H, W, device):
+        """生成 (H, W, 2) 笛卡尔 -> 极坐标 grid, 归一化到 [-1,1]"""
+        cx, cy = W / 2.0, H / 2.0
+        R_max = min(cx, cy)
+        y_grid, x_grid = torch.meshgrid(
+            torch.arange(H, device=device, dtype=torch.float32),
+            torch.arange(W, device=device, dtype=torch.float32),
+            indexing='ij'
+        )  # (H, W)
+        r_full = torch.sqrt((x_grid - cx) ** 2 + (y_grid - cy) ** 2)
+        theta_full = torch.atan2(y_grid - cy, x_grid - cx) % (2 * np.pi)
+        r_idx = 2 * (r_full / R_max).clamp(0, 1) - 1
+        theta_idx = 2 * (theta_full / (2 * np.pi)) - 1
+        grid = torch.stack([r_idx, theta_idx], dim=-1)  # (H, W, 2) (x=r, y=theta)
+        return grid
+
+    def forward(self, x):
+        """
+        x: (B, C, H, W) 笛卡尔坐标特征
+        """
+        B, C, H, W = x.shape
+        device = x.device
+
+        # 1. 笛卡尔 -> 极坐标: grid_sample
+        polar_sample_grid = self._make_polar_sample_grid(H, W, device)
+        polar_sample_grid = polar_sample_grid.unsqueeze(0).expand(B, -1, -1, -1)  # (B, n_r, n_theta, 2)
+        x_p = F.grid_sample(x, polar_sample_grid, mode='bilinear',
+                             align_corners=False, padding_mode='zeros')  # (B, C, n_r, n_theta)
+
+        # 2. 沿 θ 方向 1D 深度可分离卷积 (n_theta 维度)
+        #    Conv1d 期望 (B, C_in, L_in) 格式
+        #    重塑 (B, C, n_r, n_theta) -> (B*n_r, C, n_theta) 沿 n_theta 卷积
+        #    groups=C 深度可分离, 每个通道独立沿 θ 卷积
+        x_p_flat = x_p.permute(0, 2, 1, 3).reshape(B * self.n_r, C, self.n_theta)  # (B*n_r, C, n_theta)
+        x_p_flat = self.theta_conv(x_p_flat)  # 沿最后维 (n_theta) 卷积, groups=C
+        x_p_flat = self.theta_pointwise(x_p_flat)  # 1x1 通道混合
+        # 还原 (B, C, n_r, n_theta)
+        x_p = x_p_flat.reshape(B, self.n_r, C, self.n_theta).permute(0, 2, 1, 3).contiguous()
+
+        # 3. 沿 r 方向 1D 深度可分离卷积
+        #    重塑 (B, C, n_r, n_theta) -> (B*n_theta, C, n_r) 沿 n_r 卷积
+        x_p_flat = x_p.permute(0, 3, 1, 2).reshape(B * self.n_theta, C, self.n_r)  # (B*n_theta, C, n_r)
+        x_p_flat = self.r_conv(x_p_flat)  # 沿最后维 (n_r) 卷积, groups=C
+        x_p_flat = self.r_pointwise(x_p_flat)
+        # 还原
+        x_p = x_p_flat.reshape(B, self.n_theta, C, self.n_r).permute(0, 2, 3, 1).contiguous()  # (B, C, n_r, n_theta)
+
+        # 4. 极坐标 -> 笛卡尔
+        full_polar_grid = self._make_full_polar_grid(H, W, device)
+        full_polar_grid = full_polar_grid.unsqueeze(0).expand(B, -1, -1, -1)  # (B, H, W, 2)
+        x_out = F.grid_sample(x_p, full_polar_grid, mode='bilinear',
+                                align_corners=False, padding_mode='zeros')  # (B, C, H, W)
+
+        # 5. 残差 + scale 缩放
+        return x + self.scale * (x_out - x)
+
+
 class ChannelAttention(nn.Module):
     """
     v6 新增: 跨通道注意力 (Squeeze-and-Excitation 风格)
@@ -556,8 +694,12 @@ class UNetRefine(nn.Module):
     相比基础 U-Net, attention 让网络自适应选择对当前通道重要的特征。
 
     v6 新增: 可选 ChannelAttention (use_channel_attn=True) 显式建模跨 OAM 通道关系
+    v8 新增: 可选 PolarConv (use_polar_conv=True) 在 e3 -> bot 之间引入极坐标卷积
+            物理: 极坐标 (r, θ) 卷积天然捕获 OAM 方位角谐波结构
     """
-    def __init__(self, in_ch=1, out_ch=1, mid_ch=64, use_channel_attn=True):
+    def __init__(self, in_ch=1, out_ch=1, mid_ch=64, use_channel_attn=True,
+                 use_polar_conv=False, polar_n_r=32, polar_n_theta=96,
+                 polar_theta_kernel=7, polar_init_scale=0.0):
         super().__init__()
 
         # v6 新增: 跨通道注意力 (30 通道 = 10 OAM × 3 features)
@@ -567,6 +709,13 @@ class UNetRefine(nn.Module):
         self.enc1 = self._conv_block(in_ch, mid_ch)
         self.enc2 = self._conv_block(mid_ch, mid_ch * 2)
         self.enc3 = self._conv_block(mid_ch * 2, mid_ch * 4)
+
+        # v8 新增: PolarConv (e3 -> bot 之间, 在 mid_ch*4 通道空间)
+        #   物理: e3 输出 (B, 4*mid, H/4, W/4) 在 1080×1080 输入时是 270×270
+        #   极坐标卷积对 OAM 方位角谐波结构敏感, 直接增强 OAM 通道分离
+        self.polar_conv = (PolarConv(mid_ch * 4, n_r=polar_n_r, n_theta=polar_n_theta,
+                                      theta_kernel=polar_theta_kernel, init_scale=polar_init_scale)
+                           if use_polar_conv else nn.Identity())
 
         # Bottleneck
         self.bot = self._conv_block(mid_ch * 4, mid_ch * 8)
@@ -621,6 +770,8 @@ class UNetRefine(nn.Module):
         e1 = self.enc1(x_norm)                              # (B, mid, H, W)
         e2 = self.enc2(self._down(e1))                      # (B, 2mid, H/2, W/2)
         e3 = self.enc3(self._down(e2))                     # (B, 4mid, H/4, W/4)
+        # v8 新增: 极坐标卷积 (e3 -> bot 之间)
+        e3 = self.polar_conv(e3)
         b = self.bot(self._down(e3))                       # (B, 8mid, H/8, W/8)
 
         # Decoder + Attention Gates
@@ -662,7 +813,9 @@ class OAM_Crypt_D2NN(nn.Module):
                  obj_encoding="amplitude", theta_max=None, slm_aware=True,
                  use_channel_attn=True, mid_ch=None,
                  iterative_refine=True, n_passes=3, iterative_pass_decay=0.7,
-                 oam_freq_filter=True, oam_filter_bandwidth=0.15, oam_filter_strength=0.5):
+                 oam_freq_filter=True, oam_filter_bandwidth=0.15, oam_filter_strength=0.5,
+                 use_polar_conv=False, polar_n_r=32, polar_n_theta=96,
+                 polar_theta_kernel=7, polar_init_scale=0.0):
         super().__init__()
         self.layers = nn.ModuleList([DiffractiveLayer(size, nonlin_every=3, layer_idx=i) for i in range(num_layers)])
         self.wavelength = wavelength
@@ -701,10 +854,14 @@ class OAM_Crypt_D2NN(nn.Module):
         # out_ch = num_channels: 每个通道输出一个图像, 都在同一位置 (多平面复用)
         # v2: 3 通道/图像 (|U|, real, imag), 总输入 = 3 * num_channels
         # v6: mid_ch 可外部覆盖, 默认从 CONFIG 取; use_channel_attn 启用跨通道建模
+        # v8: use_polar_conv 启用 UNetRefine bottleneck 极坐标卷积
         _mid_ch = mid_ch if mid_ch is not None else CONFIG["mid_ch"]
         self.refine = UNetRefine(
             in_ch=3 * self.num_channels, out_ch=self.num_channels,
-            mid_ch=_mid_ch, use_channel_attn=use_channel_attn
+            mid_ch=_mid_ch, use_channel_attn=use_channel_attn,
+            use_polar_conv=use_polar_conv,
+            polar_n_r=polar_n_r, polar_n_theta=polar_n_theta,
+            polar_theta_kernel=polar_theta_kernel, polar_init_scale=polar_init_scale,
         )
         # v7 创新 2: Iterative Refinement 用 1x1 conv 把 refined (C 通道) 反馈到 3C 通道空间
         # 新增参数: C * 3C = 3C² (C=10 时 300 参数, 可忽略)
@@ -843,6 +1000,62 @@ def calculate_center_psnr(pred, target, center_size=270):
     if mse <= 0:
         return torch.tensor(float('inf'), device=mse.device)
     return 20 * torch.log10(1.0 / torch.sqrt(mse))
+
+
+def oam_fdd_loss(pred, oam_keys, l_radius=15, size=1080):
+    """
+    v8 新物理范式 2: OAM-FDD Loss (OAM 频域正交损失)
+
+    物理动机:
+      OAM 拓扑荷 l_j 通道解密后, 其图像信息应集中在方位角 θ 的第 l_j 阶谐波
+      频域 bin |l_j| 附近 (因 exp(ilθ) 沿 θ 周期 l 次)。
+      不同通道的谐波能量应正交不重叠, 即通道 j 能量集中在 bin |l_j| 附近,
+      远离其他通道 |l_i| (i≠j) 区域。
+
+    实施 (v8 改进版: 通道间频域相关性矩阵):
+      1. 对每通道, 沿 W 维度 (近似方位角方向) 做 FFT, 得到频域 Y_j(k)
+      2. 归一化每个通道: Y_norm_j = Y_j / ||Y_j||  (单位频域向量)
+      3. 通道间频域相关性矩阵: R_ij = |<Y_i, Y_j>| = |Σ_k Y_i(k) * Y_j(k)*|
+         理想情况: R_ij = δ_ij (完全正交)
+      4. 损失: Σ_{i≠j} R_ij² (最小化通道间相关性)
+
+    物理效果:
+      - 直接强制 OAM 通道在频域正交, 化解"同位置重叠"串扰
+      - 配合 PolarConv: PolarConv 增强 θ 方向结构, FDD Loss 强化频域正交
+      - 不依赖 zone 范围 (l_radius 仅用于诊断, 损失用全频域归一化)
+
+    Args:
+        pred: (B, C, H, W) U-Net 输出 (clamp 后)
+        oam_keys: list of int, 各通道 l 拓扑荷
+        l_radius: 谐波匹配半径 (用于诊断, 损失不依赖)
+        size: 空间尺寸 (默认 1080)
+    Returns:
+        loss: scalar tensor
+    """
+    B, C, H, W = pred.shape
+    device = pred.device
+    # 关键: 强制 float32, 因为 cuFFT 在 half 精度下不支持非 2 幂维度 (如 1080)
+    pred = pred.float()
+    # 1. 沿 W 维度 FFT
+    Y = torch.fft.fft(pred, dim=-1)  # (B, C, H, W) complex
+    # 2. 排除 DC bin (bin 0) 和镜像 bin (bin W/2), 关注 OAM 谐波部分
+    #    图像能量大部分在 DC, 会让所有通道相关性都接近 1 (DC 共享)
+    Y_no_dc = Y.clone()
+    Y_no_dc[..., 0] = 0
+    if W % 2 == 0:
+        Y_no_dc[..., W // 2] = 0  # Nyquist bin
+    # 3. L2 归一化
+    Y_norm = Y_no_dc / (Y_no_dc.norm(dim=-1, keepdim=True) + 1e-8)  # (B, C, H, W)
+    # 4. 通道间点积矩阵: R[i,j] = <Y_i, Y_j> = Σ_k Y_i(k) * Y_j(k)*
+    R = torch.einsum('bchk,bjhk->bchj', Y_norm, Y_norm.conj())  # (B, C, H, C)
+    R = R.abs()  # 标量
+    # 5. 提取上三角 (i<j) 通道间相关性
+    mask = torch.triu(torch.ones(C, C, device=device), diagonal=1)
+    R_offdiag = R * mask.unsqueeze(0).unsqueeze(2)  # (B, C, H, C)
+    n_pairs = mask.sum().item()
+    # 6. 损失: 平均通道间相关性 (理想正交时为 0)
+    loss = R_offdiag.sum() / (n_pairs * B * H + 1e-8)
+    return loss
 
 
 def security_ratio(pred_auth, pred_unauth):
@@ -1025,6 +1238,11 @@ def train_one_stage(stage_cfg, stage_idx, n_stages, device, rpp_system,
         oam_freq_filter=CONFIG.get("oam_freq_filter", True),
         oam_filter_bandwidth=CONFIG.get("oam_filter_bandwidth", 0.15),
         oam_filter_strength=CONFIG.get("oam_filter_strength", 0.5),
+        use_polar_conv=CONFIG.get("polar_conv", True),
+        polar_n_r=CONFIG.get("polar_n_r", 32),
+        polar_n_theta=CONFIG.get("polar_n_theta", 96),
+        polar_theta_kernel=CONFIG.get("polar_theta_kernel", 7),
+        polar_init_scale=CONFIG.get("polar_init_scale", 0.0),
     ).to(device)
 
     with torch.no_grad():
@@ -1058,7 +1276,7 @@ def train_one_stage(stage_cfg, stage_idx, n_stages, device, rpp_system,
     # 训练循环
     for epoch in range(1, epochs_stage + 1):
         model.train()
-        epoch_loss = epoch_loss_auth = epoch_loss_sec = 0.0
+        epoch_loss = epoch_loss_auth = epoch_loss_sec = epoch_loss_fdd = 0.0
         n_batches = len(train_loader)
         t_start = __import__("time").time()
         use_security = epoch > max(1, int(epochs_stage * 0.5))
@@ -1101,7 +1319,19 @@ def train_one_stage(stage_cfg, stage_idx, n_stages, device, rpp_system,
                     pred_unauth = model(cipher_unauth)
                     loss_sec = criterion_mse(pred_unauth, torch.zeros_like(pred_unauth))
 
-                total_loss = loss_auth + 0.3 * loss_sec
+                # v8 创新 2: OAM-FDD 频域正交损失
+                # 配合 PolarConv 强化 OAM 通道频域正交性
+                loss_fdd = torch.tensor(0.0, device=device)
+                if CONFIG.get("oam_fdd_loss", True) and epoch > max(1, int(epochs_stage * 0.3)):
+                    pred_clamped = pred_auth.clamp(0, 1)
+                    loss_fdd = oam_fdd_loss(
+                        pred_clamped, l_auth_stage,
+                        l_radius=CONFIG.get("oam_fdd_l_radius", 3),
+                        size=CONFIG["size"],
+                    )
+
+                total_loss = (loss_auth + 0.3 * loss_sec
+                              + CONFIG.get("oam_fdd_weight", 0.05) * loss_fdd)
 
             scaler.scale(total_loss).backward()
             scaler.step(optimizer)
@@ -1111,10 +1341,12 @@ def train_one_stage(stage_cfg, stage_idx, n_stages, device, rpp_system,
             epoch_loss += total_loss.item() * bs
             epoch_loss_auth += loss_auth.item() * bs
             epoch_loss_sec += loss_sec.item() * bs
+            epoch_loss_fdd += loss_fdd.item() * bs
 
         scheduler.step()
         n = len(train_loader.dataset)
         epoch_loss /= n; epoch_loss_auth /= n; epoch_loss_sec /= n
+        epoch_loss_fdd /= n
 
         # 验证
         model.eval()
@@ -1147,7 +1379,7 @@ def train_one_stage(stage_cfg, stage_idx, n_stages, device, rpp_system,
         avg_sr_oam = float(np.mean(sr_oam_list))
         elapsed = __import__("time").time() - t_start
         print(f"  [S{stage_idx+1} E{epoch}/{epochs_stage}] loss={epoch_loss:.5f} "
-              f"(auth={epoch_loss_auth:.5f}, sec={epoch_loss_sec:.5f}) "
+              f"(auth={epoch_loss_auth:.5f}, sec={epoch_loss_sec:.5f}, fdd={epoch_loss_fdd:.5f}) "
               f"PSNR_C={avg_psnr_c:.2f} dB SR_RPP={avg_sr_rpp:.4f} SR_OAM={avg_sr_oam:.4f} "
               f"t={elapsed:.0f}s", flush=True)
 

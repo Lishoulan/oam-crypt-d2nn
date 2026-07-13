@@ -1,0 +1,62 @@
+﻿当前运行设备: cuda
+[font_config] ✅ 使用 CJK 字体: SimHei
+================================================================================
+[v8] PolarHNN (Polar Holographic Neural Network) 训练
+================================================================================
+[v8] 创新 1: PolarConv (极坐标卷积): True
+[v8] 创新 2: OAM-FDD Loss: True
+[v8] 创新 3: Multi-scale OAM: False
+[v8] layout: oam_overlap
+[v8] polar_n_r: 32, polar_n_theta: 96
+[v8] curriculum: True
+
+[v8 oam_overlap] 自适应覆盖: epochs=50 mid_ch=48 num_layers=3 channel_attn=True
+[v8] polar_conv: True
+
+[v8 CURRICULUM] 4 stages, PSNR_C threshold=18.0 dB
+
+================================================================================
+[CURRICULUM STAGE 1/4] n_ch=2 l_auth=[-25, 25] z_list=[0.1, 0.55]
+  epochs=8 lr=0.0005
+================================================================================
+  [STAGE 1] 模型已重建, 可训练参数=11,169,761
+py : F:\d2nn\oam_crypt_d2nn.py:1263: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use 
+`torch.amp.GradScaler('cuda', args...)` instead.
+At line:15 char:5228
++ ... e_modules\@vscode\ripgrep\bin'; cd f:\d2nn; py run_v8.py 2>&1 | Tee-O ...
++                                                 ~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (F:\d2nn\oam_cry...s...)` instead.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+F:\d2nn\oam_crypt_d2nn.py:1295: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use 
+`torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+  [S1 E1/8] loss=0.02548 (auth=0.02548, sec=0.00000, fdd=0.00000) PSNR_C=20.84 dB SR_RPP=1.5432 SR_OAM=2.3521 t=93s
+    [BEST] PSNR_C 20.84 dB (epoch 1)
+  [S1 E2/8] loss=0.00651 (auth=0.00651, sec=0.00000, fdd=0.00000) PSNR_C=22.41 dB SR_RPP=1.9343 SR_OAM=3.2551 t=96s
+    [BEST] PSNR_C 22.41 dB (epoch 2)
+F:\d2nn\oam_crypt_d2nn.py:1038: UserWarning: ComplexHalf support is experimental and many operators don't support it 
+yet. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\aten\src\ATen\EmptyTensor.cpp:55.)
+  Y = torch.fft.fft(pred, dim=-1)  # (B, C, H, W) complex
+Traceback (most recent call last):
+  File "F:\d2nn\run_v8.py", line 64, in <module>
+    best_psnr, best_state, best_sr = train_one_stage(
+                                     ~~~~~~~~~~~~~~~^
+        stage_cfg=stage_cfg,
+        ^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+        layout=CONFIG["layout"],
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "F:\d2nn\oam_crypt_d2nn.py", line 1325, in train_one_stage
+    loss_fdd = oam_fdd_loss(
+        pred_clamped, l_auth_stage,
+        l_radius=CONFIG.get("oam_fdd_l_radius", 3),
+        size=CONFIG["size"],
+    )
+  File "F:\d2nn\oam_crypt_d2nn.py", line 1038, in oam_fdd_loss
+    Y = torch.fft.fft(pred, dim=-1)  # (B, C, H, W) complex
+RuntimeError: cuFFT only supports dimensions whose sizes are powers of two when computing in half precision, but got a 
+signal size of[1080]

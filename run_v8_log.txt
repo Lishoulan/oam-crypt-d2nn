@@ -1,0 +1,127 @@
+﻿当前运行设备: cuda
+[font_config] ✅ 使用 CJK 字体: SimHei
+================================================================================
+[v8] PolarHNN (Polar Holographic Neural Network) 训练
+================================================================================
+[v8] 创新 1: PolarConv (极坐标卷积): True
+[v8] 创新 2: OAM-FDD Loss: True
+[v8] 创新 3: Multi-scale OAM: False
+[v8] layout: oam_overlap
+[v8] polar_n_r: 32, polar_n_theta: 96
+[v8] curriculum: True
+
+[v8 oam_overlap] 自适应覆盖: epochs=50 mid_ch=48 num_layers=3 channel_attn=True
+[v8] polar_conv: True
+
+[v8 CURRICULUM] 4 stages, PSNR_C threshold=18.0 dB
+
+================================================================================
+[CURRICULUM STAGE 1/4] n_ch=2 l_auth=[-25, 25] z_list=[0.1, 0.55]
+  epochs=6 lr=0.0005
+================================================================================
+  [STAGE 1] 模型已重建, 可训练参数=11,169,761
+py : F:\d2nn\oam_crypt_d2nn.py:1265: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use 
+`torch.amp.GradScaler('cuda', args...)` instead.
+At line:15 char:5228
++ ... e_modules\@vscode\ripgrep\bin'; cd f:\d2nn; py run_v8.py 2>&1 | Tee-O ...
++                                                 ~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (F:\d2nn\oam_cry...s...)` instead.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+F:\d2nn\oam_crypt_d2nn.py:1297: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use 
+`torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+  [S1 E1/6] loss=0.02567 (auth=0.02567, sec=0.00000, fdd=0.00000) PSNR_C=20.30 dB SR_RPP=1.4862 SR_OAM=2.2354 t=98s
+    [BEST] PSNR_C 20.30 dB (epoch 1)
+  [S1 E2/6] loss=0.01047 (auth=0.00791, sec=0.00000, fdd=0.05119) PSNR_C=22.51 dB SR_RPP=1.2076 SR_OAM=2.0673 t=102s
+    [BEST] PSNR_C 22.51 dB (epoch 2)
+  [S1 E3/6] loss=0.00732 (auth=0.00561, sec=0.00000, fdd=0.03407) PSNR_C=23.44 dB SR_RPP=1.2752 SR_OAM=2.2752 t=105s
+    [BEST] PSNR_C 23.44 dB (epoch 3)
+  [S1 E4/6] loss=0.00767 (auth=0.00472, sec=0.00461, fdd=0.03139) PSNR_C=20.33 dB SR_RPP=1.3100 SR_OAM=1.2566 t=146s
+  [S1 E5/6] loss=0.00568 (auth=0.00384, sec=0.00191, fdd=0.02545) PSNR_C=21.17 dB SR_RPP=1.3645 SR_OAM=1.3284 t=146s
+  [S1 E6/6] loss=0.00504 (auth=0.00348, sec=0.00158, fdd=0.02157) PSNR_C=20.83 dB SR_RPP=1.4228 SR_OAM=1.2794 t=146s
+  [v8 STAGE 1 DONE] n_ch=2 PSNR_C=23.44 dB SR_OAM=2.2752 t=743s saved to oam_crypt_v8_stage1_best.pth
+
+================================================================================
+[CURRICULUM STAGE 2/4] n_ch=5 l_auth=[-25, -15, 0, 15, 25] z_list=[0.1, 0.2, 0.35, 0.45, 0.55]
+  epochs=6 lr=0.0004
+================================================================================
+  [STAGE 2] 模型已重建, 可训练参数=11,174,078
+  [S2 E1/6] loss=0.05478 (auth=0.05478, sec=0.00000, fdd=0.00000) PSNR_C=13.50 dB SR_RPP=1.3353 SR_OAM=1.2559 t=61s
+    [BEST] PSNR_C 13.50 dB (epoch 1)
+  [S2 E2/6] loss=0.02915 (auth=0.02595, sec=0.00000, fdd=0.06404) PSNR_C=15.05 dB SR_RPP=1.5654 SR_OAM=1.5871 t=61s
+    [BEST] PSNR_C 15.05 dB (epoch 2)
+  [S2 E3/6] loss=0.02056 (auth=0.01861, sec=0.00000, fdd=0.03888) PSNR_C=16.17 dB SR_RPP=1.6504 SR_OAM=1.8535 t=61s
+    [BEST] PSNR_C 16.17 dB (epoch 3)
+  [S2 E4/6] loss=0.02165 (auth=0.01527, sec=0.01491, fdd=0.03821) PSNR_C=16.53 dB SR_RPP=1.6523 SR_OAM=1.2796 t=424s
+    [BEST] PSNR_C 16.53 dB (epoch 4)
+  [S2 E5/6] loss=0.01716 (auth=0.01302, sec=0.00803, fdd=0.03469) PSNR_C=16.66 dB SR_RPP=1.7148 SR_OAM=1.2042 t=441s
+    [BEST] PSNR_C 16.66 dB (epoch 5)
+  [S2 E6/6] loss=0.01508 (auth=0.01155, sec=0.00684, fdd=0.02943) PSNR_C=16.94 dB SR_RPP=1.7245 SR_OAM=1.2004 t=291s
+    [BEST] PSNR_C 16.94 dB (epoch 6)
+  [v8 STAGE 2 DONE] n_ch=5 PSNR_C=16.94 dB SR_OAM=1.2004 t=1340s saved to oam_crypt_v8_stage2_best.pth
+  [v8 WARNING] Stage 2 PSNR_C=16.94 < threshold 18.0, continuing to next stage (curriculum strategy)
+
+================================================================================
+[CURRICULUM STAGE 3/4] n_ch=8 l_auth=[-25, -20, -15, -10, 10, 15, 20, 25] z_list=[0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.55, 0.6]
+  epochs=6 lr=0.0003
+================================================================================
+  [STAGE 3] 模型已重建, 可训练参数=11,178,503
+  [S3 E1/6] loss=0.07765 (auth=0.07765, sec=0.00000, fdd=0.00000) PSNR_C=10.66 dB SR_RPP=1.1863 SR_OAM=1.0937 t=88s
+    [BEST] PSNR_C 10.66 dB (epoch 1)
+  [S3 E2/6] loss=0.04608 (auth=0.04222, sec=0.00000, fdd=0.07716) PSNR_C=12.54 dB SR_RPP=1.3891 SR_OAM=1.3584 t=93s
+    [BEST] PSNR_C 12.54 dB (epoch 2)
+  [S3 E3/6] loss=0.03567 (auth=0.03325, sec=0.00000, fdd=0.04842) PSNR_C=13.04 dB SR_RPP=1.6416 SR_OAM=1.4806 t=94s
+    [BEST] PSNR_C 13.04 dB (epoch 3)
+  [S3 E4/6] loss=0.03805 (auth=0.02900, sec=0.02279, fdd=0.04446) PSNR_C=12.86 dB SR_RPP=1.5026 SR_OAM=1.1703 t=236s
+  [S3 E5/6] loss=0.03315 (auth=0.02639, sec=0.01556, fdd=0.04176) PSNR_C=13.10 dB SR_RPP=1.5466 SR_OAM=1.1330 t=286s
+    [BEST] PSNR_C 13.10 dB (epoch 5)
+  [S3 E6/6] loss=0.03132 (auth=0.02517, sec=0.01394, fdd=0.03936) PSNR_C=13.22 dB SR_RPP=1.6053 SR_OAM=1.1401 t=270s
+    [BEST] PSNR_C 13.22 dB (epoch 6)
+  [v8 STAGE 3 DONE] n_ch=8 PSNR_C=13.22 dB SR_OAM=1.1401 t=1068s saved to oam_crypt_v8_stage3_best.pth
+  [v8 WARNING] Stage 3 PSNR_C=13.22 < threshold 18.0, continuing to next stage (curriculum strategy)
+
+================================================================================
+[CURRICULUM STAGE 4/4] n_ch=10 l_auth=[-25, -20, -15, -10, -5, 5, 10, 15, 20, 25] z_list=[0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+  epochs=14 lr=0.0003
+================================================================================
+  [STAGE 4] 模型已重建, 可训练参数=11,181,513
+  [S4 E1/14] loss=0.08000 (auth=0.08000, sec=0.00000, fdd=0.00000) PSNR_C=10.70 dB SR_RPP=1.0980 SR_OAM=1.0348 t=47s
+    [BEST] PSNR_C 10.70 dB (epoch 1)
+  [S4 E2/14] loss=0.04758 (auth=0.04758, sec=0.00000, fdd=0.00000) PSNR_C=12.03 dB SR_RPP=1.2192 SR_OAM=1.1503 t=47s
+    [BEST] PSNR_C 12.03 dB (epoch 2)
+  [S4 E3/14] loss=0.03746 (auth=0.03746, sec=0.00000, fdd=0.00000) PSNR_C=12.53 dB SR_RPP=1.3897 SR_OAM=1.1978 t=44s
+    [BEST] PSNR_C 12.53 dB (epoch 3)
+  [S4 E4/14] loss=0.03290 (auth=0.03290, sec=0.00000, fdd=0.00000) PSNR_C=12.83 dB SR_RPP=1.5763 SR_OAM=1.2542 t=45s
+    [BEST] PSNR_C 12.83 dB (epoch 4)
+  [S4 E5/14] loss=0.03459 (auth=0.02969, sec=0.00000, fdd=0.09800) PSNR_C=13.19 dB SR_RPP=1.5263 SR_OAM=1.2237 t=44s
+    [BEST] PSNR_C 13.19 dB (epoch 5)
+  [S4 E6/14] loss=0.03022 (auth=0.02734, sec=0.00000, fdd=0.05752) PSNR_C=13.31 dB SR_RPP=1.5862 SR_OAM=1.2322 t=44s
+    [BEST] PSNR_C 13.31 dB (epoch 6)
+  [S4 E7/14] loss=0.02780 (auth=0.02536, sec=0.00000, fdd=0.04874) PSNR_C=13.49 dB SR_RPP=1.6815 SR_OAM=1.2567 t=44s
+    [BEST] PSNR_C 13.49 dB (epoch 7)
+  [S4 E8/14] loss=0.03205 (auth=0.02399, sec=0.01919, fdd=0.04609) PSNR_C=13.56 dB SR_RPP=1.6089 SR_OAM=1.1307 t=171s
+    [BEST] PSNR_C 13.56 dB (epoch 8)
+  [S4 E9/14] loss=0.02940 (auth=0.02285, sec=0.01428, fdd=0.04545) PSNR_C=13.51 dB SR_RPP=1.7404 SR_OAM=1.0797 t=167s
+  [S4 E10/14] loss=0.02779 (auth=0.02191, sec=0.01238, fdd=0.04334) PSNR_C=13.65 dB SR_RPP=1.7148 SR_OAM=1.0534 t=202s
+    [BEST] PSNR_C 13.65 dB (epoch 10)
+  [S4 E11/14] loss=0.02659 (auth=0.02108, sec=0.01143, fdd=0.04153) PSNR_C=13.71 dB SR_RPP=1.7757 SR_OAM=1.0422 t=205s
+    [BEST] PSNR_C 13.71 dB (epoch 11)
+  [S4 E12/14] loss=0.02591 (auth=0.02062, sec=0.01093, fdd=0.04027) PSNR_C=13.73 dB SR_RPP=1.7879 SR_OAM=1.0330 t=172s
+    [BEST] PSNR_C 13.73 dB (epoch 12)
+  [S4 E13/14] loss=0.02545 (auth=0.02029, sec=0.01067, fdd=0.03909) PSNR_C=13.73 dB SR_RPP=1.8313 SR_OAM=1.0263 t=177s
+    [BEST] PSNR_C 13.73 dB (epoch 13)
+  [S4 E14/14] loss=0.02517 (auth=0.02005, sec=0.01057, fdd=0.03886) PSNR_C=13.73 dB SR_RPP=1.8201 SR_OAM=1.0241 t=218s
+    [BEST] PSNR_C 13.73 dB (epoch 14)
+  [v8 STAGE 4 DONE] n_ch=10 PSNR_C=13.73 dB SR_OAM=1.0241 t=1631s saved to oam_crypt_v8_stage4_best.pth
+
+[v8 FINAL] PSNR_C=13.73 dB SR_OAM=1.0241 total_time=79.7min saved to oam_crypt_v8_final.pth
+
+[v8 SUMMARY] Curriculum 4 stage 训练总结:
+  Stage 1: n_ch= 2 PSNR_C=23.44 dB SR_OAM=2.2752 t=743s
+  Stage 2: n_ch= 5 PSNR_C=16.94 dB SR_OAM=1.2004 t=1340s
+  Stage 3: n_ch= 8 PSNR_C=13.22 dB SR_OAM=1.1401 t=1068s
+  Stage 4: n_ch=10 PSNR_C=13.73 dB SR_OAM=1.0241 t=1631s
+
+[v8] 训练流程结束
