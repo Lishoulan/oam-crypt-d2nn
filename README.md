@@ -6,17 +6,17 @@
 
 | Stage 1 攻击对比 (2 通道) | SLM 加载鲁棒性 |
 |:---:|:---:|
-| ![Stage 1 攻击对比](v8_stage1_attack_comparison.png) | ![SLM 加载](v8_stage1_slm_loading.png) |
+| ![Stage 1 攻击对比](images/v8_stage1_attack_comparison.png) | ![SLM 加载](images/v8_stage1_slm_loading.png) |
 | 合法 24.93 dB / RPP 攻击 11.21 dB / OAM 攻击 10.54 dB | 数字 23.50 dB / SLM 24.93 dB (反向 +1.4 dB) |
 
 | 训练曲线 (4 stage) | v5→v8 4 通道数性能对比 |
 |:---:|:---:|
-| ![训练曲线](v8_training_curves.png) | ![版本对比](v8_vs_v7_comparison.png) |
+| ![训练曲线](images/v8_training_curves.png) | ![版本对比](images/v8_vs_v7_comparison.png) |
 | Curriculum 渐进, Stage 1 epoch 3 达 23.44 dB ⭐ | v8 2 通道打破 v7 纪录 (23.4 vs 22.9) |
 
 | Lee 全息图 (SLM 加载) | 端到端物理链路 (Lee+4f+D2NN) |
 |:---:|:---:|
-| ![Lee 全息图](v8_hologram_typical.png) | ![端到端](v8_end_to_end.png) |
+| ![Lee 全息图](images/v8_hologram_typical.png) | ![端到端](images/v8_end_to_end.png) |
 | 满量程 0 dB 偏置, 载波条纹清晰可见 | 数字 24.93 dB → Lee+4f+D2NN **18.54 dB** ⭐ |
 
 ## Milestone v2.0 (10 通道 OAM-MDNN)
@@ -281,13 +281,13 @@ def oam_fdd_loss(pred, oam_keys, ...):
 
 #### 训练曲线可视化
 
-![v8 4 stage 训练曲线](v8_training_curves.png)
+![v8 4 stage 训练曲线](images/v8_training_curves.png)
 
 图中红色虚线为 20 dB 工程目标, Stage 1 在 epoch 3 突破 23.44 dB; Stage 4 稳定在 13.7 dB (10 通道物理上限)。
 
 #### v5 → v8 4 通道数性能对比
 
-![v5 到 v8 版本对比](v8_vs_v7_comparison.png)
+![v5 到 v8 版本对比](images/v8_vs_v7_comparison.png)
 
 v8 2 通道打破 v7 纪录 (23.4 vs 22.9 dB), 5/8/10 通道与 v7 持平。
 
@@ -303,7 +303,7 @@ v8 2 通道打破 v7 纪录 (23.4 vs 22.9 dB), 5/8/10 通道与 v7 持平。
 
 #### SLM 加载对比可视化 (Stage 1)
 
-![SLM 加载对比](v8_stage1_slm_loading.png)
+![SLM 加载对比](images/v8_stage1_slm_loading.png)
 
 左: 明文; 中: 数字加载 (无 SLM 模拟); 右: SLM 8-bit 加载。SLM 后清晰度反而略升, 因 8-bit 量化在小梯度处抑制噪声。
 
@@ -319,7 +319,7 @@ v8 2 通道打破 v7 纪录 (23.4 vs 22.9 dB), 5/8/10 通道与 v7 持平。
 
 #### 攻击对比可视化
 
-![v8 攻击对比](v8_stage1_attack_comparison.png)
+![v8 攻击对比](images/v8_stage1_attack_comparison.png)
 
 4 样本 × 4 列: 明文 | 合法解密 (24+ dB) | RPP 攻击 (~10 dB) | OAM 攻击 (~10 dB)。攻击后图像完全无法识别原内容, 加密强度工程级。
 
@@ -351,13 +351,13 @@ H(x,y) = arg( R + U_cipher(x,y) · exp(i·2π·f₀·x) )
 
 #### 满量程 Lee 全息图 (中心 540×540)
 
-![Lee 全息图](v8_hologram_typical.png)
+![Lee 全息图](images/v8_hologram_typical.png)
 
 清晰可见的水平载波条纹 + OAM 拓扑扭曲形成的弯曲结构, 是加密 cipher 在 SLM 上的物理相位加载。
 
 #### 3 种偏置对比 (0 dB / 6 dB / -3 dB)
 
-![3 种偏置对比](v8_hologram_compare.png)
+![3 种偏置对比](images/v8_hologram_compare.png)
 
 - **0 dB (满量程)**: 调制深度最大, 载波条纹清晰, +1 级能量强
 - **6 dB (弱信号)**: 线性近似好, 但相位摆幅仅 15%, 几乎看不到调制
@@ -365,7 +365,7 @@ H(x,y) = arg( R + U_cipher(x,y) · exp(i·2π·f₀·x) )
 
 #### 端到端物理链路 (Lee + 4f + D2NN)
 
-![端到端物理链路](v8_end_to_end.png)
+![端到端物理链路](images/v8_end_to_end.png)
 
 完整流程: 明文 → 加密 → Lee Hologram → SLM 8-bit 加载 → 4f 傅里叶变换 → +1 级滤波 → 物面 → D2NN → 重建 MNIST。
 
@@ -430,13 +430,25 @@ H(x,y) = arg( R + U_cipher(x,y) · exp(i·2π·f₀·x) )
 
 ### 结果图
 
-- `slm_loading_test.png` — SLM 加载测试 (10 通道 数字 vs SLM 对比)
-- `final_security_plot.png` — 安全性曲线
-- `multi_plane_quick_verify.png` — 多平面聚焦验证
-- `slm_scheme_comparison.png` — SLM 方案对比
-- `attack_oam_heatmap.png` / `attack_oam_images.png` — OAM 攻击分析
-- `eval_plot.png` / `results.png` — 评估结果
-- `slm_output/` — SLM 8-bit 全息图 (可加载到 Holoeye PLUTO)
+所有图片已统一存放在 `images/` 目录下:
+
+- `images/v8_stage1_attack_comparison.png` — v8 攻击对比 (4 样本 x 4 列)
+- `images/v8_stage1_slm_loading.png` — v8 SLM 加载鲁棒性 (4 样本 x 3 列)
+- `images/v8_training_curves.png` — v8 4 stage 训练曲线
+- `images/v8_vs_v7_comparison.png` — v5/v6/v7/v8 版本对比
+- `images/v8_hologram_typical.png` — v8 满量程 Lee 全息图
+- `images/v8_hologram_compare.png` — v8 3 种偏置对比
+- `images/v8_hologram_decompose.png` — v8 复振幅分解
+- `images/v8_end_to_end.png` — v8 端到端物理链路 (18.54 dB)
+- `images/slm_loading_test.png` — SLM 加载测试 (10 通道)
+- `images/final_security_plot.png` — 安全性曲线
+- `images/multi_plane_quick_verify.png` — 多平面聚焦验证
+- `images/slm_scheme_comparison.png` — SLM 方案对比
+- `images/attack_oam_heatmap.png` / `attack_oam_images.png` — OAM 攻击分析
+- `images/eval_plot.png` / `results.png` — 评估结果
+- `images/slm_hologram_v8_stage1_2ch_8bit.png` — v8 SLM 8-bit 全息图 (可加载到 Holoeye PLUTO)
+- `images/slm_hologram_v8_full_modulation.png` — v8 满量程 1080x1080 全息图
+- `slm_output/slm_hologram_v8_stage1_2ch_23.44dB.npy` — v8 浮点相位数据
 
 ## 快速开始
 
